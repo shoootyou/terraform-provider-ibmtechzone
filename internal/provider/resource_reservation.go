@@ -623,18 +623,31 @@ func (r *reservationResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	// 200, 204, 404, and auth failures (401/403) all mean "gone" — idempotent success.
-	// Auth failures: expired-token delete still returns an HTTP response, which is
-	// fine — the reservation is already inaccessible and will be reclaimed.
-	if httpStatus == 200 || httpStatus == 204 || httpStatus == 404 ||
-		httpStatus == 401 || httpStatus == 403 {
+	// 200, 204, 404 → idempotent success (reservation gone or never existed).
+	if httpStatus == 200 || httpStatus == 204 || httpStatus == 404 {
 		return
 	}
 
-	// Any other status is a genuine error.
+	// 302, 401, 403 → auth failure (expired/invalid token).
+	// The bearer token MUST NOT appear in this message (RFC §4, Ei F-02).
+	//
+	// State is intentionally NOT modified here. The Framework only auto-clears
+	// state on a clean (no-error) delete; when Diagnostics.HasError() the state
+	// written into DeleteResponse is preserved as-is. Leaving state intact allows
+	// the operator to refresh their token and retry — without having to re-import
+	// the resource first.
+	if httpStatus == 302 || httpStatus == 401 || httpStatus == 403 {
+		resp.Diagnostics.AddError(
+			"TECHZONE_API_KEY is invalid or expired",
+			"TECHZONE_API_KEY is invalid or expired. Refresh it at https://techzone.ibm.com and re-run.",
+		)
+		return
+	}
+
+	// Any other non-2xx → generic error with the HTTP status code.
 	resp.Diagnostics.AddError(
 		"TechZone reservation delete failed",
-		fmt.Sprintf("DELETE /api/reservation/aws/%s returned HTTP %d. Body: %s",
+		fmt.Sprintf("DELETE /api/reservation/aws/%s: delete failed: HTTP %d. Body: %s",
 			reservationID, httpStatus, truncate(body, 512)),
 	)
 }

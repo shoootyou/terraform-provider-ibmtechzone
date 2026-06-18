@@ -5,17 +5,24 @@
 
 package provider_test
 
-// Audit round-1 regression tests — HIGH findings (Sho-A #1, Shin F-2/Sho-B #1).
+// Audit regression tests — HIGH findings (Sho-A #1, advisory-probe, contract B).
 //
-// RED tests (MUST fail against current code):
-//   TestAccReservation_InPlaceUpdateOperational — proves the UseStateForUnknown bug
-//   TestAccReservation_DestroyWithExpiredToken  — proves the advisory-probe bug
+// Tests in this file:
+//   TestAccReservation_InPlaceUpdateOperational          — UseStateForUnknown regression guard
+//   TestAccReservation_AdvisoryProbe_DoesNotBlockWorkingDelete — advisory probe + working DELETE
+//   TestAccReservation_Delete_Success_Codes              — 200/204/404 positive pin
+//   TestAccReservation_ReadExpiredStatusPrune            — Expired terminal-status acc arm
+//   TestAccReservation_DeleteBodyShape                   — DELETE request body contract
+//   TestAccTokenValidation_ExpiredToken_Create           — Create-path token-failure guard
 //
-// Coverage additions (GREEN against current code):
-//   TestAccReservation_ReadExpiredStatusPrune   — Expired terminal-status acc arm
-//   TestAccReservation_DeleteBodyShape          — asserts DELETE request body fields
-//   TestAccTokenValidation_ExpiredToken_Create  — replaces the incorrectly-scoped
-//                                                 Scenario 8 with a Create-path guard
+// Contract B (Delete on auth-failure 302/401/403 → error + state preserved) is pinned
+// at the UNIT level in resource_reservation_delete_unit_test.go (package provider),
+// which calls r.Delete() directly and asserts both the actionable error and that
+// resp.State is not blanked.  Acceptance-level tests for auth-failure DELETE are
+// intentionally absent here because the resource.Test framework's post-test-cleanup
+// destroy loop requires the resource to eventually disappear from state, which pushed
+// Kou toward the orphaning state-blanking hack.  The unit tests cover the contract
+// without that pressure.
 
 import (
 	"encoding/json"
@@ -165,155 +172,14 @@ func TestAccReservation_AdvisoryProbe_DoesNotBlockWorkingDelete(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RED — Delete receives auth-failure HTTP status → actionable error (contract B)
-// ---------------------------------------------------------------------------
-
-// TestAccReservation_Delete_AuthFailure_302 is a RED test proving contract B:
-//
-// When the TechZone API returns HTTP 302 (SSO redirect) on DELETE — the
-// realistic scenario when a token has expired mid-operation — the destroy MUST
-// FAIL with an ACTIONABLE error telling the user to refresh TECHZONE_API_KEY.
-//
-// Current behavior (why it is RED today):
-//   - 302 is not in the {200, 204, 404, 401, 403} success set, so it reaches the
-//     generic "HTTP 302" AddError path — the error fires, but the message is cryptic
-//     (contains only the status code, not an actionable "refresh your token" instruction).
-//   - The test asserts the actionable message pattern, which does NOT match the
-//     generic "HTTP 302" text → test FAILS (RED).
-//
-// Goes GREEN when Kou detects auth-failure HTTP codes (302, 401, 403) in Delete
-// and emits "TECHZONE_API_KEY is invalid or expired. Refresh it…" instead of
-// the generic status-code error.
-//
-// Token-safety: the sentinel must NOT appear in the error (asserted via the
-// ExpectError regexp that matches the actionable message but does not match the sentinel).
-func TestAccReservation_Delete_AuthFailure_302(t *testing.T) {
-	mock := newMockServer(t)
-	// deleteMode = "302_redirect": DELETE returns 302 + Location header (SSO redirect).
-	// This simulates the TechZone API redirecting an expired-token DELETE to SSO login.
-
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
-		Steps: []resource.TestStep{
-			// Step 1: Create normally (token valid, DELETE not yet called).
-			{
-				Config: reservationConfig(mock.URL(), sentinelToken),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-				),
-			},
-			// Step 2: Destroy. DELETE returns 302. Must fail with an actionable error.
-			{
-				Config: providerConfigHCL(mock.URL(), sentinelToken),
-				PreConfig: func() {
-					mock.mu.Lock()
-					mock.deleteMode = "302_redirect"
-					mock.mu.Unlock()
-				},
-				// Must error with "expired/refresh/TECHZONE_API_KEY" — NOT the generic
-				// "HTTP 302" message. This is the RED assertion.
-				ExpectError: deleteAuthFailureRegexp(),
-			},
-		},
-	})
-
-	// Token-safety belt: the actionable regexp must NOT itself match the sentinel.
-	// If it did, the ExpectError would only prove the sentinel appeared in the error,
-	// which would be a token leak rather than an actionable message assertion.
-	if deleteAuthFailureRegexp().MatchString(sentinelToken) {
-		t.Errorf("token safety: deleteAuthFailureRegexp matches the sentinel token — pattern is too broad")
-	}
-}
-
-// TestAccReservation_Delete_AuthFailure_401 is a RED test proving contract B
-// for HTTP 401 on DELETE.
-//
-// Current behavior (why it is RED today):
-//   - 401 is in the {200, 204, 404, 401, 403} success set — the current code
-//     treats 401 as "resource gone, idempotent success" (line 629-631).
-//   - The test uses ExpectError, but the current code returns no error on 401.
-//   - The test FAILS because "expected an error but got none" (RED).
-//
-// Goes GREEN when Kou removes 401/403 from the success set and instead emits the
-// actionable "TECHZONE_API_KEY is invalid or expired" error for auth-failure codes.
-//
-// Token-safety: sentinel must NOT appear in the error message.
-func TestAccReservation_Delete_AuthFailure_401(t *testing.T) {
-	mock := newMockServer(t)
-
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
-		Steps: []resource.TestStep{
-			{
-				Config: reservationConfig(mock.URL(), sentinelToken),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-				),
-			},
-			{
-				Config: providerConfigHCL(mock.URL(), sentinelToken),
-				PreConfig: func() {
-					mock.mu.Lock()
-					mock.deleteMode = "401"
-					mock.mu.Unlock()
-				},
-				ExpectError: deleteAuthFailureRegexp(),
-			},
-		},
-	})
-
-	if deleteAuthFailureRegexp().MatchString(sentinelToken) {
-		t.Errorf("token safety: deleteAuthFailureRegexp matches the sentinel token")
-	}
-}
-
-// TestAccReservation_Delete_AuthFailure_403 is a RED test proving contract B
-// for HTTP 403 on DELETE. Mirrors the 401 test.
-func TestAccReservation_Delete_AuthFailure_403(t *testing.T) {
-	mock := newMockServer(t)
-
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
-		Steps: []resource.TestStep{
-			{
-				Config: reservationConfig(mock.URL(), sentinelToken),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-				),
-			},
-			{
-				Config: providerConfigHCL(mock.URL(), sentinelToken),
-				PreConfig: func() {
-					mock.mu.Lock()
-					mock.deleteMode = "403"
-					mock.mu.Unlock()
-				},
-				ExpectError: deleteAuthFailureRegexp(),
-			},
-		},
-	})
-}
-
-// deleteAuthFailureRegexp matches the actionable token-expired error that Delete
-// must emit on 302/401/403 (contract B). Mirrors the Create/Read token-invalid
-// message: "TECHZONE_API_KEY is invalid or expired. Refresh it…"
-//
-// The regexp deliberately does NOT match the sentinel token, so the token-safety
-// self-check (MatchString(sentinelToken) == false) confirms no accidental broadening.
-func deleteAuthFailureRegexp() *regexp.Regexp {
-	return regexp.MustCompile(`(?i)(invalid|expired|refresh|TECHZONE_API_KEY)`)
-}
-
-// ---------------------------------------------------------------------------
 // Delete succeeds on 200, 204, 404 — positive contract pin
 // ---------------------------------------------------------------------------
 
 // TestAccReservation_Delete_Success_Codes is an explicit positive pin of the
-// three idempotent-success codes: 200, 204, 404. Complements the RED auth-failure
-// tests above by confirming the success branch is unchanged.
+// three idempotent-success codes: 200, 204, 404.
 //
-// (This mirrors TestAccReservation_DeleteIdempotent but is co-located with the
-// auth-failure tests for readability of the contract B spec.)
+// Complement: the auth-failure contract (302/401/403 → actionable error + state
+// preserved) is tested at the unit level in resource_reservation_delete_unit_test.go.
 func TestAccReservation_Delete_Success_Codes(t *testing.T) {
 	for _, code := range []int{200, 204, 404} {
 		code := code
@@ -440,10 +306,10 @@ func TestAccReservation_DeleteBodyShape(t *testing.T) {
 // validate probe during a CREATE-path operation surfaces the actionable
 // "TECHZONE_API_KEY is invalid or expired" error.
 //
-// This is the guard for the Create/Read path. The expected behavior by path:
+// This covers the Create/Read path. The expected behavior by path:
 //   - Create/Read: 401 probe → hard error → operation fails with actionable message.
-//   - Destroy with advisory probe + working DELETE: see TestAccReservation_AdvisoryProbe_DoesNotBlockWorkingDelete.
-//   - Destroy where DELETE itself gets 401/302: see TestAccReservation_Delete_AuthFailure_*.
+//   - Destroy with advisory probe + working DELETE: TestAccReservation_AdvisoryProbe_DoesNotBlockWorkingDelete.
+//   - Delete receiving auth-failure (302/401/403): unit tests in resource_reservation_delete_unit_test.go.
 func TestAccTokenValidation_ExpiredToken_Create(t *testing.T) {
 	mock := newMockServer(t)
 	mock.tokenValidateMode = "401"
