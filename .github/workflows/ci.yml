@@ -1,0 +1,83 @@
+---
+# CI workflow — runs on every push and pull request.
+#
+# Jobs:
+#   test  — go vet + go test (unit tests; NO TF_ACC — no live API calls).
+#           Acceptance tests are opt-in via `make testacc` locally; they land
+#           in CI in E5 once the mock server is wired up.
+#   build — cross-compile to confirm the provider builds on the target platforms.
+#
+# All `uses:` lines are SHA-pinned (40-char commit SHA + version comment).
+# Workspace convention: uses: owner/action@<sha> # vX.Y.Z
+# Re-resolve SHAs when bumping action versions: deref annotated tag via
+#   gh api repos/{owner}/{repo}/git/ref/tags/vX.Y.Z
+
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify modules (supply-chain hygiene — detects tampered deps)
+        run: go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      # NOTE: TF_ACC is deliberately NOT set here.
+      # Unit tests run without it; the framework's resource.UnitTest helper
+      # does not require TF_ACC. Acceptance tests (mock-backed, TF_ACC=1)
+      # are added in E5 once the mock server is implemented.
+      # To run acceptance tests locally: make testacc
+      - name: Test
+        run: go test ./... -count=1
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
