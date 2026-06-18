@@ -56,6 +56,7 @@ type mockTechZoneServer struct {
 	//   "ready"       — 200 + Ready response with serviceLinks (default)
 	//   "404"         — 404
 	//   "deleted"     — 200 + status=Deleted
+	//   "expired"     — 200 + status=Expired (terminal, not 404)
 	//   "past_expiry" — 200 + Ready + provisionUntil 1 hour ago
 	canonicalReadMode string
 
@@ -235,6 +236,19 @@ func (m *mockTechZoneServer) handleCanonicalRead(w http.ResponseWriter, _ *http.
 		fmt.Fprint(w, `{
 			"id": "test-reservation-id",
 			"status": "Deleted",
+			"serviceLinks": [{"type": "AWS Console", "url": "https://stale.example.com"}],
+			"provisionDate":  null,
+			"provisionUntil": null
+		}`)
+
+	case "expired":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// TechZone may return 200 + status=Expired for a reservation that has
+		// passed its window. IsTerminalStatus("Expired") → true → RemoveResource().
+		fmt.Fprint(w, `{
+			"id": "test-reservation-id",
+			"status": "Expired",
 			"serviceLinks": [{"type": "AWS Console", "url": "https://stale.example.com"}],
 			"provisionDate":  null,
 			"provisionUntil": null

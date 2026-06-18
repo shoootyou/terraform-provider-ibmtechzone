@@ -175,6 +175,9 @@ data "techzone_token_validation" "probe" {}`,
 // ---------------------------------------------------------------------------
 
 // TestProvider_Configure_ValidToken: 200 + JSON body → Configure succeeds (no error).
+//
+// withProbeDS() is appended so that Terraform dispatches ValidateProviderConfig and
+// ConfigureProvider RPCs (Shin F-8 fix: provider-only configs are no-ops in TF 1.15+).
 func TestProvider_Configure_ValidToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Confirm the Authorization: Bearer header is present.
@@ -195,7 +198,9 @@ func TestProvider_Configure_ValidToken(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config: providerConfigHCL(srv.URL, sentinelToken),
+				// withProbeDS() forces Configure to run (Shin F-8).
+				// Without it, TF CLI 1.15+ skips Configure for provider-only configs.
+				Config: providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				// No ExpectError: valid token + JSON body → Configure succeeds.
 			},
 		},
@@ -204,6 +209,8 @@ func TestProvider_Configure_ValidToken(t *testing.T) {
 
 // TestProvider_Configure_200_NullBodyIsValid: 200 + "null" body is valid JSON
 // (parseability, not truthiness — RFC §4).
+//
+// withProbeDS() is appended so that Terraform dispatches ConfigureProvider (Shin F-8).
 func TestProvider_Configure_200_NullBodyIsValid(t *testing.T) {
 	// Validate the test assumption: json.Valid([]byte("null")) must be true.
 	if !json.Valid([]byte(`null`)) {
@@ -221,7 +228,7 @@ func TestProvider_Configure_200_NullBodyIsValid(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config: providerConfigHCL(srv.URL, sentinelToken),
+				Config: providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				// No ExpectError: 200 + valid JSON (null) → Configure succeeds.
 			},
 		},

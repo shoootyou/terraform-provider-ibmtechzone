@@ -42,6 +42,8 @@ package techzone_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -381,5 +383,298 @@ func TestDoGet_AuthorizationHeader_NeverInURL(t *testing.T) {
 
 	if tokenFoundInURL {
 		t.Error("token safety violation: sentinel token found in URL — must be header-only")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DoPost — Shin F-3 coverage (mirrors DoGet tests above)
+// ---------------------------------------------------------------------------
+
+// TestDoPost_CorrectMethodAndHeaders verifies that DoPost:
+//   - uses HTTP POST (not GET/PUT/PATCH)
+//   - sets Authorization: Bearer <api_key> header
+//   - sets Content-Type: application/json
+//   - never puts the token in the URL
+func TestDoPost_CorrectMethodAndHeaders(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotAuth, gotContentType string
+	tokenInURL := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		if strings.Contains(r.URL.String(), sentinelToken) {
+			tokenInURL = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"new-res"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, body, err := c.DoPost(context.Background(), "/api/reservation/aws", []byte(`{"name":"test"}`))
+	if err != nil {
+		t.Fatalf("DoPost returned unexpected error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("expected status 200, got %d", status)
+	}
+	if !json.Valid(body) {
+		t.Errorf("expected JSON body, got: %s", body)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected HTTP method POST, got %q", gotMethod)
+	}
+	if !strings.HasPrefix(gotAuth, "Bearer ") {
+		t.Errorf("expected Authorization: Bearer header, got %q", gotAuth)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("expected Content-Type: application/json, got %q", gotContentType)
+	}
+	if tokenInURL {
+		t.Error("token safety: sentinel found in URL — must be header-only")
+	}
+}
+
+// TestDoPost_SendsBody verifies that the request body provided to DoPost is
+// actually sent to the server.
+func TestDoPost_SendsBody(t *testing.T) {
+	t.Parallel()
+
+	wantBody := `{"name":"test-reservation","region":"us-east-2"}`
+	var gotBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"res-123"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, _, err = c.DoPost(context.Background(), "/api/reservation/aws", []byte(wantBody))
+	if err != nil {
+		t.Fatalf("DoPost: %v", err)
+	}
+	if string(gotBody) != wantBody {
+		t.Errorf("DoPost sent body %q, want %q", gotBody, wantBody)
+	}
+}
+
+// TestDoPost_Returns4xx verifies that DoPost returns the raw status code for
+// 4xx/5xx responses without wrapping them as Go errors.
+func TestDoPost_Returns4xx(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":"invalid payload"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, _, err := c.DoPost(context.Background(), "/api/reservation/aws", []byte(`{}`))
+	if err != nil {
+		// 4xx must NOT be a Go error — the status code carries the signal.
+		assertNoTokenLeak(t, err.Error())
+		t.Fatalf("DoPost returned unexpected Go error on 422: %v", err)
+	}
+	if status != http.StatusUnprocessableEntity {
+		t.Errorf("expected status 422, got %d", status)
+	}
+}
+
+// TestDoPost_TransportError_NoTokenLeak verifies that DoPost returns an error
+// on transport failure and the sentinel token does NOT appear in the error string.
+func TestDoPost_TransportError_NoTokenLeak(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // closed before DoPost is called
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, _, err := c.DoPost(context.Background(), "/api/reservation/aws", []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected transport error for closed server, got nil")
+	}
+	if status != 0 {
+		t.Errorf("expected status 0 on transport error, got %d", status)
+	}
+	assertNoTokenLeak(t, err.Error())
+}
+
+// ---------------------------------------------------------------------------
+// DoDelete — Shin F-3 coverage (mirrors DoGet / DoPost tests above)
+// ---------------------------------------------------------------------------
+
+// TestDoDelete_CorrectMethodAndHeaders verifies that DoDelete:
+//   - uses HTTP DELETE
+//   - sets Authorization: Bearer <api_key> header
+//   - sets Content-Type: application/json
+//   - never puts the token in the URL
+func TestDoDelete_CorrectMethodAndHeaders(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod, gotAuth, gotContentType string
+	tokenInURL := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		if strings.Contains(r.URL.String(), sentinelToken) {
+			tokenInURL = true
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	status, _, err := c.DoDelete(context.Background(), "/api/reservation/aws/test-id",
+		[]byte(`{"IBMID":"user@example.com","requestType":"aws","reservationId":"test-id"}`))
+	if err != nil {
+		t.Fatalf("DoDelete returned unexpected error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Errorf("expected status 200, got %d", status)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("expected HTTP method DELETE, got %q", gotMethod)
+	}
+	if !strings.HasPrefix(gotAuth, "Bearer ") {
+		t.Errorf("expected Authorization: Bearer header, got %q", gotAuth)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("expected Content-Type: application/json, got %q", gotContentType)
+	}
+	if tokenInURL {
+		t.Error("token safety: sentinel found in URL — must be header-only")
+	}
+}
+
+// TestDoDelete_SendsBody verifies that the JSON body provided to DoDelete is
+// actually sent (the delete body contains IBMID/requestType/reservationId).
+func TestDoDelete_SendsBody(t *testing.T) {
+	t.Parallel()
+
+	wantBody := `{"IBMID":"user@example.com","requestType":"aws","reservationId":"res-abc"}`
+	var gotBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, _, err = c.DoDelete(context.Background(), "/api/reservation/aws/res-abc", []byte(wantBody))
+	if err != nil {
+		t.Fatalf("DoDelete: %v", err)
+	}
+	if string(gotBody) != wantBody {
+		t.Errorf("DoDelete sent body %q, want %q", gotBody, wantBody)
+	}
+}
+
+// TestDoDelete_Returns204and404 verifies that DoDelete returns the raw status
+// for idempotent-success codes 204 and 404 without wrapping them as Go errors.
+func TestDoDelete_Returns204and404(t *testing.T) {
+	t.Parallel()
+	for _, wantCode := range []int{http.StatusNoContent, http.StatusNotFound} {
+		wantCode := wantCode
+		t.Run(fmt.Sprintf("HTTP_%d", wantCode), func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(wantCode)
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := techzone.NewClient(srv.URL, sentinelToken)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			status, _, err := c.DoDelete(context.Background(), "/api/reservation/aws/test-id", nil)
+			if err != nil {
+				assertNoTokenLeak(t, err.Error())
+				t.Fatalf("DoDelete returned unexpected Go error on %d: %v", wantCode, err)
+			}
+			if status != wantCode {
+				t.Errorf("expected status %d, got %d", wantCode, status)
+			}
+		})
+	}
+}
+
+// TestDoDelete_TransportError_NoTokenLeak_NoPIILeak verifies that DoDelete
+// returns an error on transport failure and:
+//   - the sentinel token does NOT appear in the error string (token safety)
+//   - the PII sentinel (user_email placeholder) does NOT appear in the error (Ei F-07)
+func TestDoDelete_TransportError_NoTokenLeak_NoPIILeak(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	c, err := techzone.NewClient(srv.URL, sentinelToken)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	const piiSentinel = "pii-user@example.com"
+	deleteBody, _ := json.Marshal(map[string]string{
+		"IBMID":         piiSentinel,
+		"requestType":   "aws",
+		"reservationId": "res-abc",
+	})
+
+	status, _, err := c.DoDelete(context.Background(), "/api/reservation/aws/res-abc", deleteBody)
+	if err == nil {
+		t.Fatal("expected transport error for closed server, got nil")
+	}
+	if status != 0 {
+		t.Errorf("expected status 0 on transport error, got %d", status)
+	}
+	// Token safety.
+	assertNoTokenLeak(t, err.Error())
+	// PII safety (Ei F-07): the delete body contains user_email as IBMID —
+	// the error string must not echo back the request body.
+	if strings.Contains(err.Error(), piiSentinel) {
+		t.Errorf("PII leak: user_email sentinel found in error: %q", err.Error())
 	}
 }
