@@ -67,6 +67,14 @@ type mockTechZoneServer struct {
 	deleteStatusSequence []int
 	deleteCallCount      int
 
+	// deleteMode overrides deleteStatusSequence for auth-failure scenarios:
+	//   ""             — use deleteStatusSequence (default)
+	//   "302_redirect" — 302 with Location: /sso (SSO redirect on expired token)
+	//   "401"          — 401 Unauthorized (auth failure)
+	//   "403"          — 403 Forbidden (auth failure)
+	//   "500"          — 500 Internal Server Error (non-auth failure)
+	deleteMode string
+
 	// --- Token validate (GET /api/my/reservations/all) ---
 
 	// tokenValidateMode controls what GET /api/my/reservations/all returns:
@@ -278,12 +286,6 @@ func (m *mockTechZoneServer) handleCanonicalRead(w http.ResponseWriter, _ *http.
 // handleDelete — DELETE /api/reservation/aws/<id>
 func (m *mockTechZoneServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
-	idx := m.deleteCallCount
-	if idx >= len(m.deleteStatusSequence) {
-		idx = len(m.deleteStatusSequence) - 1
-	}
-	code := m.deleteStatusSequence[idx]
-	m.deleteCallCount++
 
 	// Record body for assertions.
 	body := make([]byte, 0)
@@ -293,8 +295,42 @@ func (m *mockTechZoneServer) handleDelete(w http.ResponseWriter, r *http.Request
 		body = buf[:n]
 	}
 	m.DeleteBodies = append(m.DeleteBodies, body)
+
+	mode := m.deleteMode
+	idx := m.deleteCallCount
+	if idx >= len(m.deleteStatusSequence) {
+		idx = len(m.deleteStatusSequence) - 1
+	}
+	code := m.deleteStatusSequence[idx]
+	m.deleteCallCount++
 	m.mu.Unlock()
 
+	// Auth-failure modes (override deleteStatusSequence).
+	// These simulate a TechZone API returning an auth error on DELETE —
+	// which happens when the token has expired mid-operation.
+	switch mode {
+	case "302_redirect":
+		// 302 with SSO Location header — exactly what TechZone returns when the
+		// Bearer token is expired. The client has CheckRedirect=ErrUseLastResponse
+		// so the redirect is observed raw (status=302) rather than followed.
+		w.Header().Set("Location", m.server.URL+"/sso-login")
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusFound)
+		fmt.Fprint(w, "<html><body>Sign in to IBM</body></html>")
+		return
+	case "401":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":"Unauthorized","message":"Token is expired or invalid"}`)
+		return
+	case "403":
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"error":"Forbidden","message":"Insufficient permissions"}`)
+		return
+	}
+
+	// Default: use deleteStatusSequence.
 	if code == 500 {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"error":"delete failed"}`)
