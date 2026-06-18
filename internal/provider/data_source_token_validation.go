@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
 )
 
 // Ensure tokenValidationDataSource satisfies the datasource.DataSource interface.
@@ -22,8 +23,7 @@ var _ datasource.DataSource = &tokenValidationDataSource{}
 // shell-script `data "shell_script" "token_validation"` from VCDLD-1678.
 type tokenValidationDataSource struct {
 	// client is the provider-level *techzone.Client injected by Configure.
-	// TODO(kou): type as *techzone.Client once the package is wired in.
-	client interface{}
+	client *techzone.Client
 }
 
 // tokenValidationModel holds the computed attributes for this data source.
@@ -60,20 +60,35 @@ func (d *tokenValidationDataSource) Schema(_ context.Context, _ datasource.Schem
 }
 
 // Configure receives the provider-configured client from Configure().
-// TODO(kou): implement — assert client type, store in d.client.
+// If ProviderData is nil (validate phase) or the wrong type, we return silently.
 func (d *tokenValidationDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	// E2 stub.
 	if req.ProviderData == nil {
+		// Normal during the validate phase — no client yet.
 		return
 	}
-	d.client = req.ProviderData
+
+	client, ok := req.ProviderData.(*techzone.Client)
+	if !ok {
+		// Unexpected type — do not panic; surface a diagnostic.
+		resp.Diagnostics.AddError(
+			"Unexpected provider data type",
+			"Expected *techzone.Client in ProviderData.",
+		)
+		return
+	}
+
+	d.client = client
 }
 
 // Read performs the token validation and sets status = "valid".
-// TODO(kou): implement — invoke client probe, set status, emit diagnostics on failure.
+// No second HTTP call is made — the token was already validated in Configure.
 func (d *tokenValidationDataSource) Read(_ context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
-	// E2 stub — always sets status to empty, causing the acceptance test to fail (RED).
+	// If the client is nil (validate-only phase), return silently.
+	if d.client == nil {
+		return
+	}
+
 	_ = resp.State.Set(context.Background(), tokenValidationModel{
-		Status: types.StringValue(""),
+		Status: types.StringValue("valid"),
 	})
 }

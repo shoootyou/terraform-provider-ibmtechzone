@@ -15,8 +15,11 @@ package techzone
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"time"
 )
 
 // Client holds the configuration for the TechZone API HTTP client.
@@ -27,6 +30,16 @@ type Client struct {
 	apiBase    string
 	apiKey     string
 	httpClient *http.Client
+}
+
+// isLoopback reports whether host (as parsed from the URL) is a loopback address.
+// Accepts exactly: "127.0.0.1", "localhost", "::1" (with or without brackets).
+func isLoopback(host string) bool {
+	switch host {
+	case "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	}
+	return false
 }
 
 // NewClient constructs a Client after validating apiBase.
@@ -44,8 +57,46 @@ type Client struct {
 // opts is reserved for future functional options (e.g. custom *http.Client
 // injection in tests); callers pass nothing today.
 func NewClient(apiBase, apiKey string, opts ...func(*Client)) (*Client, error) {
-	// TODO(kou): implement — validate scheme, build *http.Client, apply opts.
-	return nil, errors.New("not implemented")
+	parsed, err := url.Parse(apiBase)
+	if err != nil {
+		return nil, fmt.Errorf("invalid api_base URL: %w", err)
+	}
+
+	switch parsed.Scheme {
+	case "https":
+		// always accepted
+	case "http":
+		// accepted only for loopback hosts
+		if !isLoopback(parsed.Hostname()) {
+			return nil, fmt.Errorf(
+				"api_base must use https:// (got %q): only loopback hosts (127.0.0.1, localhost, ::1) are permitted with http://",
+				parsed.Scheme+"://"+parsed.Host,
+			)
+		}
+	default:
+		return nil, fmt.Errorf(
+			"api_base must use https:// (got scheme %q)",
+			parsed.Scheme,
+		)
+	}
+
+	c := &Client{
+		apiBase: apiBase,
+		apiKey:  apiKey,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				// Never follow redirects — 3xx surfaces as-is to caller.
+				return http.ErrUseLastResponse
+			},
+		},
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c, nil
 }
 
 // DoGet performs a GET request to path (relative to c.apiBase).
@@ -53,6 +104,28 @@ func NewClient(apiBase, apiKey string, opts ...func(*Client)) (*Client, error) {
 // or returns the token value. The returned status is the raw HTTP status
 // code; body is the response body bytes.
 func (c *Client) DoGet(ctx context.Context, path string) (status int, body []byte, err error) {
-	// TODO(kou): implement.
-	return 0, nil, errors.New("not implemented")
+	reqURL := c.apiBase + path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		// Do not include apiKey in the error.
+		return 0, nil, fmt.Errorf("building request for %s: %w", path, err)
+	}
+
+	// Set Authorization header — never in URL.
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		// Transport failure — connectivity-class error. Do NOT include the token.
+		return 0, nil, fmt.Errorf("connecting to TechZone API at %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading response body from %s: %w", path, err)
+	}
+
+	return resp.StatusCode, respBody, nil
 }

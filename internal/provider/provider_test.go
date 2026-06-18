@@ -47,15 +47,30 @@ func assertNoTokenLeak(t *testing.T, msg string) {
 }
 
 // ---------------------------------------------------------------------------
-// providerConfigHCL builds a provider "techzone" {} block for test steps.
+// HCL config helpers
 // ---------------------------------------------------------------------------
 
+// providerConfigHCL builds a provider "techzone" {} block for test steps.
 func providerConfigHCL(apiBase, apiKey string) string {
 	return fmt.Sprintf(`
 provider "techzone" {
   api_key  = %q
   api_base = %q
 }`, apiKey, apiBase)
+}
+
+// withProbeDS returns a data source block that forces Terraform to dispatch the
+// provider lifecycle (ValidateProviderConfig + ConfigureProvider RPCs).
+//
+// Background: Terraform CLI 1.15+ does NOT invoke Configure/ValidateConfig when a
+// config contains only a provider block and no resources or data sources — it plans
+// "No changes" and skips the provider lifecycle entirely. Appending this block to
+// any test config that must exercise Configure or ValidateConfig ensures the RPCs
+// are dispatched, without introducing a second HTTP call (the data source reuses
+// the client set by Configure).
+func withProbeDS() string {
+	return `
+data "techzone_token_validation" "probe" {}`
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +147,11 @@ provider "techzone" {
 }
 
 // TestProvider_ValidateConfig_NonHTTPSNonLoopback: http://evil.com → diagnostic error.
+//
+// The data "techzone_token_validation" block is required to force Terraform to
+// dispatch ValidateProviderConfig/ConfigureProvider RPCs — a config containing
+// only a provider block produces "No changes" and the provider lifecycle is never
+// invoked (Terraform CLI 1.15+ behaviour).
 func TestProvider_ValidateConfig_NonHTTPSNonLoopback(t *testing.T) {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -141,7 +161,8 @@ func TestProvider_ValidateConfig_NonHTTPSNonLoopback(t *testing.T) {
 provider "techzone" {
   api_key  = "some-token"
   api_base = "http://evil.com"
-}`,
+}
+data "techzone_token_validation" "probe" {}`,
 				// ValidateConfig MUST emit a diagnostic for this base.
 				ExpectError: regexp.MustCompile(`(?i)(https|insecure|loopback|api_base|must use https)`),
 			},
@@ -209,6 +230,8 @@ func TestProvider_Configure_200_NullBodyIsValid(t *testing.T) {
 
 // TestProvider_Configure_200_HTMLBody_IsInvalid: 200 + HTML → parseability fails →
 // Configure must emit the "token invalid/expired" diagnostic.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_200_HTMLBody_IsInvalid(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -221,7 +244,7 @@ func TestProvider_Configure_200_HTMLBody_IsInvalid(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config:      providerConfigHCL(srv.URL, sentinelToken),
+				Config:      providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				ExpectError: tokenInvalidRegexp(),
 			},
 		},
@@ -231,6 +254,8 @@ func TestProvider_Configure_200_HTMLBody_IsInvalid(t *testing.T) {
 // TestProvider_Configure_302_SSORedirect_IsInvalid: 302 → status-wins → token invalid.
 // The redirect target MUST NOT be reached (CheckRedirect = ErrUseLastResponse).
 // Ei F-01: yields "token invalid/expired", never a JSON-parse error, never success.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_302_SSORedirect_IsInvalid(t *testing.T) {
 	ssoReached := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +280,7 @@ func TestProvider_Configure_302_SSORedirect_IsInvalid(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config:      providerConfigHCL(srv.URL, sentinelToken),
+				Config:      providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				ExpectError: tokenInvalidRegexp(),
 			},
 		},
@@ -263,6 +288,8 @@ func TestProvider_Configure_302_SSORedirect_IsInvalid(t *testing.T) {
 }
 
 // TestProvider_Configure_401_IsInvalid: 401 → token invalid diagnostic.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_401_IsInvalid(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -274,7 +301,7 @@ func TestProvider_Configure_401_IsInvalid(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config:      providerConfigHCL(srv.URL, sentinelToken),
+				Config:      providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				ExpectError: tokenInvalidRegexp(),
 			},
 		},
@@ -282,6 +309,8 @@ func TestProvider_Configure_401_IsInvalid(t *testing.T) {
 }
 
 // TestProvider_Configure_403_IsInvalid: 403 → token invalid diagnostic.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_403_IsInvalid(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -293,7 +322,7 @@ func TestProvider_Configure_403_IsInvalid(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config:      providerConfigHCL(srv.URL, sentinelToken),
+				Config:      providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				ExpectError: tokenInvalidRegexp(),
 			},
 		},
@@ -302,6 +331,8 @@ func TestProvider_Configure_403_IsInvalid(t *testing.T) {
 
 // TestProvider_Configure_TransportError_ConnectivityMessage: closed server →
 // connectivity diagnostic that does NOT blame the token.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_TransportError_ConnectivityMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srvURL := srv.URL
@@ -311,7 +342,7 @@ func TestProvider_Configure_TransportError_ConnectivityMessage(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srvURL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config:      providerConfigHCL(srvURL, sentinelToken),
+				Config:      providerConfigHCL(srvURL, sentinelToken) + withProbeDS(),
 				ExpectError: connectivityErrorRegexp(),
 			},
 		},
@@ -322,6 +353,8 @@ func TestProvider_Configure_TransportError_ConnectivityMessage(t *testing.T) {
 // the "token invalid" diagnostic text (Ei F-02 / Shin F-5).
 // The test server records only that "Authorization: Bearer <something>" is present —
 // it never records the token value.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_TokenSafety_302(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
@@ -341,7 +374,7 @@ func TestProvider_Configure_TokenSafety_302(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srv.URL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config: providerConfigHCL(srv.URL, sentinelToken),
+				Config: providerConfigHCL(srv.URL, sentinelToken) + withProbeDS(),
 				// Must error with the token-invalid message…
 				ExpectError: tokenInvalidRegexp(),
 				// …and the ExpectError regexp must NOT match the sentinel itself.
@@ -354,6 +387,8 @@ func TestProvider_Configure_TokenSafety_302(t *testing.T) {
 
 // TestProvider_Configure_TokenSafety_TransportError: sentinel token must NOT appear
 // in the connectivity error diagnostic.
+//
+// The data source block forces the provider lifecycle to be dispatched.
 func TestProvider_Configure_TokenSafety_TransportError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srvURL := srv.URL
@@ -363,7 +398,7 @@ func TestProvider_Configure_TokenSafety_TransportError(t *testing.T) {
 		ProtoV6ProviderFactories: providerFactoriesFor(srvURL, sentinelToken),
 		Steps: []resource.TestStep{
 			{
-				Config:      providerConfigHCL(srvURL, sentinelToken),
+				Config:      providerConfigHCL(srvURL, sentinelToken) + withProbeDS(),
 				ExpectError: connectivityErrorRegexp(),
 			},
 		},

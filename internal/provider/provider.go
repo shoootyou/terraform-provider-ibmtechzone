@@ -16,13 +16,17 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"net/url"
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
 )
 
 // Ensure Provider satisfies the provider.Provider interface at compile time.
@@ -82,14 +86,52 @@ func (p *Provider) Schema(_ context.Context, _ provider.SchemaRequest, resp *pro
 	}
 }
 
+// isLoopbackHost reports whether host is a loopback address (without port).
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
+}
+
 // ValidateConfig performs provider-level config validation.
 //
 // Rejects a non-https non-loopback api_base with a diagnostic.
-// TODO(kou): implement — emit framework diagnostic for invalid base.
 func (p *Provider) ValidateConfig(_ context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
-	// E2 stub — validation logic added by Kou.
-	_ = req
-	_ = resp
+	var config providerModel
+	diags := req.Config.Get(context.Background(), &config)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// If api_base is not set or unknown, nothing to validate.
+	if config.APIBase.IsNull() || config.APIBase.IsUnknown() {
+		return
+	}
+
+	apiBase := config.APIBase.ValueString()
+	parsed, err := url.Parse(apiBase)
+	if err != nil {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("api_base"),
+			"Invalid api_base URL",
+			"api_base must be a valid URL. "+
+				"Got: "+apiBase,
+		)
+		return
+	}
+
+	if parsed.Scheme != "https" && !isLoopbackHost(parsed.Hostname()) {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("api_base"),
+			"api_base must use https://",
+			"The api_base URL must use https:// unless the host is a loopback "+
+				"address (127.0.0.1, localhost, ::1). "+
+				"Got: "+apiBase,
+		)
+	}
 }
 
 // Configure initialises provider-level state (HTTP client, api_key, api_base).
@@ -100,13 +142,83 @@ func (p *Provider) ValidateConfig(_ context.Context, req provider.ValidateConfig
 //   - status == 200, non-JSON → "token invalid/expired" diagnostic
 //   - transport error         → connectivity diagnostic (does NOT blame token)
 //   - success                 → stores *Client in resp.DataSourceData and resp.ResourceData
-//
-// TODO(kou): implement.
-func (p *Provider) Configure(_ context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
-	// E2 stub — apply env fallback, build client, probe, store in response.
-	_ = os.Getenv("TECHZONE_API_KEY") // referenced so the import stays
-	_ = req
-	_ = resp
+func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+	var config providerModel
+	diags := req.Config.Get(ctx, &config)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Resolve api_base — default to production endpoint.
+	apiBase := "https://api.techzone.ibm.com"
+	if !config.APIBase.IsNull() && !config.APIBase.IsUnknown() {
+		apiBase = config.APIBase.ValueString()
+	}
+
+	// Resolve api_key — attr first, then env fallback.
+	// Read exactly once into a local variable; never reference config.APIKey again.
+	var apiKey string
+	if config.APIKey.IsNull() || config.APIKey.IsUnknown() {
+		apiKey = os.Getenv("TECHZONE_API_KEY")
+	} else {
+		apiKey = config.APIKey.ValueString()
+	}
+
+	// If no api_key is available, skip the probe — resources/data sources that
+	// actually need the client will fail at that point with a clearer message.
+	// This allows `provider "techzone" {}` (no key) to pass schema validation.
+	if apiKey == "" {
+		return
+	}
+
+	// Build the client (scheme/loopback validation also happens here).
+	client, err := techzone.NewClient(apiBase, apiKey)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Invalid provider configuration",
+			"Could not create TechZone client: "+err.Error(),
+		)
+		return
+	}
+
+	// Probe the reservations endpoint to validate the token.
+	const probePath = "/api/my/reservations/all"
+	status, body, err := client.DoGet(ctx, probePath)
+	if err != nil {
+		// Transport failure — do NOT blame the token.
+		resp.Diagnostics.AddError(
+			"Could not reach TechZone API",
+			"A network error prevented connecting to the TechZone API. "+
+				"Check your network connectivity and the api_base setting. "+
+				"Transport error: "+err.Error(),
+		)
+		return
+	}
+
+	if status != 200 {
+		// Non-200 (including 3xx that were not followed) → token is invalid/expired.
+		resp.Diagnostics.AddError(
+			"TECHZONE_API_KEY is invalid or expired",
+			"TECHZONE_API_KEY is invalid or expired. "+
+				"Refresh it at https://techzone.ibm.com and re-run.",
+		)
+		return
+	}
+
+	// 200 but non-JSON body (e.g. SSO HTML page) → token is invalid/expired.
+	if !json.Valid(body) {
+		resp.Diagnostics.AddError(
+			"TECHZONE_API_KEY is invalid or expired",
+			"TECHZONE_API_KEY is invalid or expired. "+
+				"Refresh it at https://techzone.ibm.com and re-run.",
+		)
+		return
+	}
+
+	// Token is valid — store the client for resources and data sources.
+	resp.DataSourceData = client
+	resp.ResourceData = client
 }
 
 // Resources returns the list of managed resources this provider supports.
