@@ -222,14 +222,16 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 }
 
 // Resources returns the list of managed resources this provider supports.
-// E1: empty — techzone_reservation added in E3.
 func (p *Provider) Resources(_ context.Context) []func() resource.Resource {
-	return nil
+	return []func() resource.Resource{
+		NewReservationResource,
+	}
 }
 
 // DataSources returns the list of data sources this provider supports.
 func (p *Provider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		NewTokenValidationDataSource,
+		NewReservationDataSource,
 	}
 }

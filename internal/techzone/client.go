@@ -14,6 +14,7 @@
 package techzone
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -123,6 +124,66 @@ func (c *Client) DoGet(ctx context.Context, path string) (status int, body []byt
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading response body from %s: %w", path, err)
+	}
+
+	return resp.StatusCode, respBody, nil
+}
+
+// DoPost performs a POST request to path with the given body.
+// Sets Authorization: Bearer and Content-Type: application/json headers.
+// Returns (status, body, nil) on any completed HTTP response; (0, nil, err) on
+// transport failure. The api_key is never included in error strings.
+func (c *Client) DoPost(ctx context.Context, path string, body []byte) (status int, respBody []byte, err error) {
+	reqURL := c.apiBase + path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, fmt.Errorf("building POST request for %s: %w", path, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("connecting to TechZone API at %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading response body from %s: %w", path, err)
+	}
+
+	return resp.StatusCode, respBody, nil
+}
+
+// DoDelete performs a DELETE request to path with the given JSON body.
+// Sets Authorization: Bearer and Content-Type: application/json headers.
+// Returns (status, body, nil) on any completed HTTP response; (0, nil, err) on
+// transport failure. The api_key is never included in error strings.
+func (c *Client) DoDelete(ctx context.Context, path string, body []byte) (status int, respBody []byte, err error) {
+	reqURL := c.apiBase + path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, fmt.Errorf("building DELETE request for %s: %w", path, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("connecting to TechZone API at %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, nil, fmt.Errorf("reading response body from %s: %w", path, err)
 	}
