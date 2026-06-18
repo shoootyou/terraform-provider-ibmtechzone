@@ -17,6 +17,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 
@@ -42,6 +43,24 @@ type Provider struct {
 type providerModel struct {
 	APIKey  types.String `tfsdk:"api_key"`
 	APIBase types.String `tfsdk:"api_base"`
+}
+
+// providerData is passed to every resource and data source via
+// resp.ResourceData / resp.DataSourceData. It carries both the client and any
+// token-probe error that occurred during Configure.
+//
+// Separation rationale (RFC §6 / audit fix H2):
+//   - Create and Read are load-bearing: they AddError if TokenErr != nil.
+//   - Delete MUST succeed even when the token is expired (RFC §3.3 / §4 M1);
+//     it ignores TokenErr entirely.
+//   - The techzone_token_validation data source Read surfaces TokenErr as an
+//     AddError so it can act as a plan-time gate.
+//   - TokenErrIsConnectivity distinguishes a network/transport failure from a
+//     token-invalid failure so callers can emit the right diagnostic summary.
+type providerData struct {
+	Client                 *techzone.Client
+	TokenErr               error
+	TokenErrIsConnectivity bool
 }
 
 // New returns a provider factory function. Called by main.go and by the acceptance
@@ -98,9 +117,9 @@ func isLoopbackHost(host string) bool {
 // ValidateConfig performs provider-level config validation.
 //
 // Rejects a non-https non-loopback api_base with a diagnostic.
-func (p *Provider) ValidateConfig(_ context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
+func (p *Provider) ValidateConfig(ctx context.Context, req provider.ValidateConfigRequest, resp *provider.ValidateConfigResponse) {
 	var config providerModel
-	diags := req.Config.Get(context.Background(), &config)
+	diags := req.Config.Get(ctx, &config)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -136,12 +155,17 @@ func (p *Provider) ValidateConfig(_ context.Context, req provider.ValidateConfig
 
 // Configure initialises provider-level state (HTTP client, api_key, api_base).
 //
-// Reads api_key from config (with TECHZONE_API_KEY env fallback).
-// Builds a *techzone.Client and probes GET /api/my/reservations/all:
-//   - status != 200           → "token invalid/expired" diagnostic
-//   - status == 200, non-JSON → "token invalid/expired" diagnostic
-//   - transport error         → connectivity diagnostic (does NOT blame token)
-//   - success                 → stores *Client in resp.DataSourceData and resp.ResourceData
+// Token-gate refactor (audit fix H2 / RFC §6):
+// Configure always stores a *providerData in resp.ResourceData/DataSourceData.
+// The token probe result is stored in providerData.TokenErr — Configure NEVER
+// calls AddError for a probe failure. This allows terraform destroy to proceed
+// even when the token is expired: Delete reads providerData but ignores TokenErr.
+//
+// Probe decision order:
+//  1. Transport error → connectivity problem (does NOT blame token).
+//  2. status != 200 → token expired/invalid.
+//  3. 200 + !json.Valid(body) → token invalid (SSO HTML redirect page).
+//  4. 200 + json.Valid(body) → token valid.
 func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var config providerModel
 	diags := req.Config.Get(ctx, &config)
@@ -150,7 +174,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		return
 	}
 
-	// Resolve api_base — default to production endpoint.
+	// Resolve api_base — default to production endpoint, strip any trailing slash.
 	apiBase := "https://api.techzone.ibm.com"
 	if !config.APIBase.IsNull() && !config.APIBase.IsUnknown() {
 		apiBase = config.APIBase.ValueString()
@@ -165,10 +189,12 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		apiKey = config.APIKey.ValueString()
 	}
 
-	// If no api_key is available, skip the probe — resources/data sources that
-	// actually need the client will fail at that point with a clearer message.
-	// This allows `provider "techzone" {}` (no key) to pass schema validation.
+	// If no api_key is available, store an empty providerData so resources can
+	// emit a clear "no key" error when they need one.
 	if apiKey == "" {
+		pd := &providerData{}
+		resp.DataSourceData = pd
+		resp.ResourceData = pd
 		return
 	}
 
@@ -183,42 +209,43 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 	}
 
 	// Probe the reservations endpoint to validate the token.
+	// Result is stored in providerData.TokenErr — never AddError here.
 	const probePath = "/api/my/reservations/all"
-	status, body, err := client.DoGet(ctx, probePath)
-	if err != nil {
-		// Transport failure — do NOT blame the token.
-		resp.Diagnostics.AddError(
-			"Could not reach TechZone API",
-			"A network error prevented connecting to the TechZone API. "+
+	var tokenErr error
+	var tokenErrIsConnectivity bool
+
+	status, body, probeErr := client.DoGet(ctx, probePath)
+	if probeErr != nil {
+		// Transport failure — do NOT blame the token. Store a connectivity error
+		// so Create/Read can surface it, but allow Delete to proceed.
+		tokenErr = fmt.Errorf(
+			"a network error prevented connecting to the TechZone API. "+
 				"Check your network connectivity and the api_base setting. "+
-				"Transport error: "+err.Error(),
+				"Transport error: %s", probeErr.Error(),
 		)
-		return
-	}
-
-	if status != 200 {
+		tokenErrIsConnectivity = true
+	} else if status != 200 {
 		// Non-200 (including 3xx that were not followed) → token is invalid/expired.
-		resp.Diagnostics.AddError(
-			"TECHZONE_API_KEY is invalid or expired",
-			"TECHZONE_API_KEY is invalid or expired. "+
+		tokenErr = fmt.Errorf(
+			"TECHZONE_API_KEY is invalid or expired. " +
 				"Refresh it at https://techzone.ibm.com and re-run.",
 		)
-		return
-	}
-
-	// 200 but non-JSON body (e.g. SSO HTML page) → token is invalid/expired.
-	if !json.Valid(body) {
-		resp.Diagnostics.AddError(
-			"TECHZONE_API_KEY is invalid or expired",
-			"TECHZONE_API_KEY is invalid or expired. "+
+	} else if !json.Valid(body) {
+		// 200 but non-JSON body (e.g. SSO HTML page) → token is invalid/expired.
+		tokenErr = fmt.Errorf(
+			"TECHZONE_API_KEY is invalid or expired. " +
 				"Refresh it at https://techzone.ibm.com and re-run.",
 		)
-		return
 	}
 
-	// Token is valid — store the client for resources and data sources.
-	resp.DataSourceData = client
-	resp.ResourceData = client
+	// Always store client + probe result. Resources decide what to do with TokenErr.
+	pd := &providerData{
+		Client:                 client,
+		TokenErr:               tokenErr,
+		TokenErrIsConnectivity: tokenErrIsConnectivity,
+	}
+	resp.DataSourceData = pd
+	resp.ResourceData = pd
 }
 
 // Resources returns the list of managed resources this provider supports.

@@ -9,7 +9,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
 )
 
 // Ensure tokenValidationDataSource satisfies the datasource.DataSource interface.
@@ -18,12 +17,12 @@ var _ datasource.DataSource = &tokenValidationDataSource{}
 // tokenValidationDataSource implements the techzone_token_validation data source.
 //
 // This is a zero-input, plan-time gate that emits { status = "valid" } when the
-// provider's configured token is valid. It reuses the *techzone.Client stored in
-// provider Configure (no second HTTP call). It is the drop-in replacement for the
+// provider's configured token is valid. It reuses the probe result stored in
+// providerData (no second HTTP call). It is the drop-in replacement for the
 // shell-script `data "shell_script" "token_validation"` from VCDLD-1678.
 type tokenValidationDataSource struct {
-	// client is the provider-level *techzone.Client injected by Configure.
-	client *techzone.Client
+	// pd is the provider-level data injected by Configure.
+	pd *providerData
 }
 
 // tokenValidationModel holds the computed attributes for this data source.
@@ -59,36 +58,55 @@ func (d *tokenValidationDataSource) Schema(_ context.Context, _ datasource.Schem
 	}
 }
 
-// Configure receives the provider-configured client from Configure().
+// Configure receives the provider-configured data from Configure().
 // If ProviderData is nil (validate phase) or the wrong type, we return silently.
 func (d *tokenValidationDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
 	if req.ProviderData == nil {
-		// Normal during the validate phase — no client yet.
+		// Normal during the validate phase — no provider data yet.
 		return
 	}
 
-	client, ok := req.ProviderData.(*techzone.Client)
+	pd, ok := req.ProviderData.(*providerData)
 	if !ok {
 		// Unexpected type — do not panic; surface a diagnostic.
 		resp.Diagnostics.AddError(
 			"Unexpected provider data type",
-			"Expected *techzone.Client in ProviderData.",
+			"Expected *providerData in ProviderData.",
 		)
 		return
 	}
 
-	d.client = client
+	d.pd = pd
 }
 
 // Read performs the token validation and sets status = "valid".
-// No second HTTP call is made — the token was already validated in Configure.
-func (d *tokenValidationDataSource) Read(_ context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
-	// If the client is nil (validate-only phase), return silently.
-	if d.client == nil {
+//
+// Token-gate: if the Configure probe recorded a TokenErr, surface it here as
+// an AddError so this data source acts as a plan-time gate (audit fix H2).
+// No second HTTP call is made — the probe result is already in pd.TokenErr.
+func (d *tokenValidationDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
+	// Nil pd means validate-only phase (no provider data set yet) — return silently.
+	if d.pd == nil {
 		return
 	}
 
-	_ = resp.State.Set(context.Background(), tokenValidationModel{
+	// If the token probe failed, surface the error here as a plan-time gate.
+	if d.pd.TokenErr != nil {
+		if d.pd.TokenErrIsConnectivity {
+			resp.Diagnostics.AddError(
+				"Could not reach TechZone API",
+				d.pd.TokenErr.Error(),
+			)
+		} else {
+			resp.Diagnostics.AddError(
+				"TECHZONE_API_KEY is invalid or expired",
+				d.pd.TokenErr.Error(),
+			)
+		}
+		return
+	}
+
+	_ = resp.State.Set(ctx, tokenValidationModel{
 		Status: types.StringValue("valid"),
 	})
 }

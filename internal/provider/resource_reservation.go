@@ -37,20 +37,21 @@ var _ resource.ResourceWithImportState = &reservationResource{}
 
 // reservationResource implements the techzone_reservation managed resource.
 type reservationResource struct {
-	client *techzone.Client
+	pd  *providerData
+	now func() time.Time // injectable clock; defaults to time.Now (audit fix H3)
 }
 
 // reservationModel is the Terraform state model for techzone_reservation.
 type reservationModel struct {
 	// Identity inputs (RequiresReplace)
-	Template             types.String `tfsdk:"template"`
-	Region               types.String `tfsdk:"region"`
-	ReservationName      types.String `tfsdk:"reservation_name"`
-	Purpose              types.String `tfsdk:"purpose"`
-	CollectionID         types.String `tfsdk:"collection_id"`
-	UserEmail            types.String `tfsdk:"user_email"`
-	HCPOrg               types.String `tfsdk:"hcp_org"`
-	HCPProject           types.String `tfsdk:"hcp_project"`
+	Template        types.String `tfsdk:"template"`
+	Region          types.String `tfsdk:"region"`
+	ReservationName types.String `tfsdk:"reservation_name"`
+	Purpose         types.String `tfsdk:"purpose"`
+	CollectionID    types.String `tfsdk:"collection_id"`
+	UserEmail       types.String `tfsdk:"user_email"`
+	HCPOrg          types.String `tfsdk:"hcp_org"`
+	HCPProject      types.String `tfsdk:"hcp_project"`
 
 	// Operational inputs (no RequiresReplace)
 	ReservationDurationDays types.Int64 `tfsdk:"reservation_duration_days"`
@@ -86,15 +87,15 @@ var serviceLinkAttrTypes = map[string]attr.Type{
 // holding "null" — both cases handled identically (as "") but kept distinct
 // internally so PastExpiry can receive the correct value.
 type tzReservationResponse struct {
-	ID            string       `json:"id"`
-	Status        *string      `json:"status"`
-	ServiceLinks  []tzSvcLink  `json:"serviceLinks"`
-	ProvisionDate *string      `json:"provisionDate"`
-	Start         *string      `json:"start"`
-	StartDate     *string      `json:"startDate"`
+	ID             string      `json:"id"`
+	Status         *string     `json:"status"`
+	ServiceLinks   []tzSvcLink `json:"serviceLinks"`
+	ProvisionDate  *string     `json:"provisionDate"`
+	Start          *string     `json:"start"`
+	StartDate      *string     `json:"startDate"`
 	ProvisionUntil *string     `json:"provisionUntil"`
-	End           *string      `json:"end"`
-	EndDate       *string      `json:"endDate"`
+	End            *string     `json:"end"`
+	EndDate        *string     `json:"endDate"`
 }
 
 // tzSvcLink is one element from the serviceLinks array.
@@ -119,7 +120,9 @@ type tzPollResponse struct {
 
 // NewReservationResource is the factory function registered in Resources().
 func NewReservationResource() resource.Resource {
-	return &reservationResource{}
+	return &reservationResource{
+		now: time.Now, // default injectable clock (audit fix H3)
+	}
 }
 
 func (r *reservationResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -217,6 +220,11 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"status": schema.StringAttribute{
 				MarkdownDescription: "Current reservation status (e.g. `Ready`, `Provisioning`).",
 				Computed:            true,
+				// UseStateForUnknown prevents "Provider produced inconsistent result" on
+				// operational-only Updates (audit fix H1 / Sho-A #1): the Framework would
+				// mark status as "(known after apply)" when only timeout_minutes changes,
+				// but Update copies state → state, so the Framework sees a plan mismatch.
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"service_links": schema.ListNestedAttribute{
 				MarkdownDescription: "Service links attached to this reservation.",
@@ -238,32 +246,37 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"start_date": schema.StringAttribute{
 				MarkdownDescription: "Reservation start date from `provisionDate` (or fallback chain).",
 				Computed:            true,
+				// UseStateForUnknown: same rationale as status (audit fix H1).
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"end_date": schema.StringAttribute{
 				MarkdownDescription: "Reservation end date from `provisionUntil` (or fallback chain).",
 				Computed:            true,
+				// UseStateForUnknown: same rationale as status (audit fix H1).
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 		},
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Configure — receive client from provider
+// Configure — receive providerData from provider
 // ---------------------------------------------------------------------------
 
 func (r *reservationResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
+		// Normal during the validate phase — no provider data yet.
 		return
 	}
-	client, ok := req.ProviderData.(*techzone.Client)
+	pd, ok := req.ProviderData.(*providerData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected provider data type",
-			"Expected *techzone.Client in ProviderData.",
+			"Expected *providerData in ProviderData.",
 		)
 		return
 	}
-	r.client = client
+	r.pd = pd
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +284,18 @@ func (r *reservationResource) Configure(_ context.Context, req resource.Configur
 // ---------------------------------------------------------------------------
 
 func (r *reservationResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	if r.client == nil {
+	if r.pd == nil || r.pd.Client == nil {
 		resp.Diagnostics.AddError("Provider not configured",
 			"The provider has no api_key configured. Configure the provider with a valid TechZone API key.")
+		return
+	}
+	// Token gate: Create is load-bearing — fail if token probe failed.
+	if r.pd.TokenErr != nil {
+		if r.pd.TokenErrIsConnectivity {
+			resp.Diagnostics.AddError("Could not reach TechZone API", r.pd.TokenErr.Error())
+		} else {
+			resp.Diagnostics.AddError("TECHZONE_API_KEY is invalid or expired", r.pd.TokenErr.Error())
+		}
 		return
 	}
 
@@ -284,7 +306,7 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 	}
 
 	// Compute start/end timestamps: start = now+1min, end = now+1min+duration_days.
-	now := time.Now().UTC()
+	now := r.now().UTC()
 	start := now.Add(1 * time.Minute).Format("2006-01-02T15:04:05.000Z")
 	durationDays := plan.ReservationDurationDays.ValueInt64()
 	end := now.Add(1*time.Minute + time.Duration(durationDays)*24*time.Hour).Format("2006-01-02T15:04:05.000Z")
@@ -308,7 +330,7 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 	}
 
 	// POST /api/reservation/aws
-	status, body, err := r.client.DoPost(ctx, "/api/reservation/aws", payload)
+	status, body, err := r.pd.Client.DoPost(ctx, "/api/reservation/aws", payload)
 	if err != nil {
 		resp.Diagnostics.AddError("TechZone API unreachable", fmt.Sprintf("POST /api/reservation/aws: %s", err.Error()))
 		return
@@ -333,20 +355,26 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 	reservationID := createResp.ID
 
 	// Poll loop: GET /api/reservation/<id> every 10s until Ready or terminal.
+	// Poll starts at T+0: first GET immediately, before the first ticker tick
+	// (audit fix Sho-A #2 / medium finding #5).
 	timeoutMinutes := plan.TimeoutMinutes.ValueInt64()
 	maxAttempts := timeoutMinutes * 6 // 6 × 10s = 60s per minute
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	for attempt := int64(1); attempt <= maxAttempts; attempt++ {
-		select {
-		case <-ctx.Done():
-			resp.Diagnostics.AddError("Context cancelled", "Terraform interrupted while waiting for reservation to become Ready.")
-			return
-		case <-ticker.C:
+	// attempt counts from 0; first iteration fires immediately (T+0 poll).
+	for attempt := int64(0); attempt < maxAttempts; attempt++ {
+		// On subsequent attempts, wait for the next tick.
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				resp.Diagnostics.AddError("Context cancelled", "Terraform interrupted while waiting for reservation to become Ready.")
+				return
+			case <-ticker.C:
+			}
 		}
 
-		pollStatus, pollBody, pollErr := r.client.DoGet(ctx, "/api/reservation/"+reservationID)
+		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/"+reservationID)
 		if pollErr != nil {
 			// Transient connectivity error — log and retry.
 			continue
@@ -393,7 +421,7 @@ pollDone:
 	// documented improvement (RFC §3.1: the bash final GET was un-hardened).
 	var finalResp *tzReservationResponse
 	for attempt := int64(0); attempt < maxAttempts; attempt++ {
-		canStatus, canBody, canErr := r.client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+		canStatus, canBody, canErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
 		if canErr != nil {
 			select {
 			case <-ctx.Done():
@@ -443,7 +471,15 @@ pollDone:
 // ---------------------------------------------------------------------------
 
 func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	if r.client == nil {
+	if r.pd == nil || r.pd.Client == nil {
+		return
+	}
+	// Token gate: Read is NOT load-bearing for the destroy path. When the token
+	// is expired, we return silently (leaving state unchanged) so Terraform can
+	// proceed to plan and execute the Delete. Delete tolerates an expired token
+	// (RFC §3.3/§4 M1). If we AddError here, destroy is aborted before Delete
+	// runs — that is the bug this fix corrects (audit fix H2 / Shin F-2).
+	if r.pd.TokenErr != nil {
 		return
 	}
 
@@ -460,7 +496,7 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	httpStatus, body, err := r.client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+	httpStatus, body, err := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
 	if err != nil {
 		resp.Diagnostics.AddError("TechZone API unreachable during Read",
 			fmt.Sprintf("GET /api/reservation/aws/%s: %s", reservationID, err.Error()))
@@ -498,9 +534,9 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	// Prune: past provisionUntil.
+	// Prune: past provisionUntil (audit fix H3: use injected clock r.now()).
 	provisionUntil := derefString(apiResp.ProvisionUntil)
-	if techzone.PastExpiry(provisionUntil, time.Now()) {
+	if techzone.PastExpiry(provisionUntil, r.now()) {
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -538,11 +574,13 @@ func (r *reservationResource) Update(ctx context.Context, req resource.UpdateReq
 }
 
 // ---------------------------------------------------------------------------
-// Delete — idempotent
+// Delete — idempotent; tolerates expired/invalid token (audit fix H2, M4)
 // ---------------------------------------------------------------------------
 
 func (r *reservationResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
-	if r.client == nil {
+	// Delete MUST proceed even if the token probe failed (RFC §3.3/§4 M1).
+	// We only need a client — TokenErr is intentionally ignored here.
+	if r.pd == nil || r.pd.Client == nil {
 		// No client — nothing to delete.
 		return
 	}
@@ -571,21 +609,29 @@ func (r *reservationResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	httpStatus, body, err := r.client.DoDelete(ctx, "/api/reservation/aws/"+reservationID, deletePayload)
+	httpStatus, body, err := r.pd.Client.DoDelete(ctx, "/api/reservation/aws/"+reservationID, deletePayload)
 	if err != nil {
-		// Transport failure — still consider this a best-effort delete.
-		// Log but do not fail: the resource will be removed from state.
-		resp.Diagnostics.AddWarning("TechZone delete transport error",
-			fmt.Sprintf("DELETE /api/reservation/aws/%s: %s. Removing from state.", reservationID, err.Error()))
+		// True transport failure (non-nil err with no usable HTTP response) →
+		// AddError (audit fix Sho-A #3 / medium finding #4).
+		// Note: http.ErrUseLastResponse can yield a non-nil err WITH a non-nil
+		// resp — the DoDelete implementation returns (status, body, nil) in that
+		// case, so err != nil here genuinely means no usable response was obtained.
+		resp.Diagnostics.AddError(
+			"TechZone delete transport error",
+			fmt.Sprintf("DELETE /api/reservation/aws/%s: %s", reservationID, err.Error()),
+		)
 		return
 	}
 
-	// 200, 204, 404 all mean "gone" — idempotent success.
-	if httpStatus == 200 || httpStatus == 204 || httpStatus == 404 {
+	// 200, 204, 404, and auth failures (401/403) all mean "gone" — idempotent success.
+	// Auth failures: expired-token delete still returns an HTTP response, which is
+	// fine — the reservation is already inaccessible and will be reclaimed.
+	if httpStatus == 200 || httpStatus == 204 || httpStatus == 404 ||
+		httpStatus == 401 || httpStatus == 403 {
 		return
 	}
 
-	// Any other status is an error.
+	// Any other status is a genuine error.
 	resp.Diagnostics.AddError(
 		"TechZone reservation delete failed",
 		fmt.Sprintf("DELETE /api/reservation/aws/%s returned HTTP %d. Body: %s",
@@ -612,6 +658,7 @@ func (r *reservationResource) ImportState(ctx context.Context, req resource.Impo
 // Date sourcing (RFC §3.2, gotchas/techzone.md):
 //   - start_date: provisionDate → start → startDate → ""
 //   - end_date:   provisionUntil → end → endDate → ""
+//
 // The fallback chain is identical to the jq filters in create.sh and read.sh.
 func mapResponseToModel(base reservationModel, r *tzReservationResponse) reservationModel {
 	out := base

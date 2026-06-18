@@ -37,7 +37,8 @@ import (
 // in-place Update with no replacement and no error.
 //
 // Current failure mode:
-//   "Provider produced inconsistent result after apply"
+//
+//	"Provider produced inconsistent result after apply"
 //
 // Root cause: status, start_date, and end_date are Computed attributes with no
 // UseStateForUnknown() plan modifier.  On an operational-only Update the Framework
@@ -113,8 +114,9 @@ resource "techzone_reservation" "test" {
 // token-validate probe returns 401.
 //
 // Current failure mode:
-//   Configure returns a hard error on 401 → the destroy graph is aborted
-//   before Delete is ever called.
+//
+//	Configure returns a hard error on 401 → the destroy graph is aborted
+//	before Delete is ever called.
 //
 // Root cause: provider.Configure does not distinguish between create/read paths
 // (where the token check is load-bearing) and the destroy path (where it is not —

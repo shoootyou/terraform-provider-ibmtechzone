@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -55,9 +56,9 @@ func isLoopback(host string) bool {
 //   - Sets CheckRedirect to return http.ErrUseLastResponse (never follows redirects).
 //   - Has a 30-second overall timeout.
 //
-// opts is reserved for future functional options (e.g. custom *http.Client
-// injection in tests); callers pass nothing today.
-func NewClient(apiBase, apiKey string, opts ...func(*Client)) (*Client, error) {
+// A trailing slash on apiBase is normalized away so that path concatenation
+// in DoGet/DoPost/DoDelete always produces a clean URL.
+func NewClient(apiBase, apiKey string) (*Client, error) {
 	parsed, err := url.Parse(apiBase)
 	if err != nil {
 		return nil, fmt.Errorf("invalid api_base URL: %w", err)
@@ -82,7 +83,7 @@ func NewClient(apiBase, apiKey string, opts ...func(*Client)) (*Client, error) {
 	}
 
 	c := &Client{
-		apiBase: apiBase,
+		apiBase: strings.TrimRight(apiBase, "/"),
 		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -91,10 +92,6 @@ func NewClient(apiBase, apiKey string, opts ...func(*Client)) (*Client, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-	}
-
-	for _, opt := range opts {
-		opt(c)
 	}
 
 	return c, nil

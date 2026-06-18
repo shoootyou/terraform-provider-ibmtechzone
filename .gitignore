@@ -42,3 +42,10 @@ go.work.sum
 *.swo
 .idea/
 .vscode/
+
+# ── Secrets / credentials (Ei-B F5) ─────────────────────────────────────────
+# These files must never be committed — they may contain sensitive values.
+.env
+*.key
+*.pem
+terraform.tfvars

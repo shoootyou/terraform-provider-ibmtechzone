@@ -31,14 +31,14 @@ var platformRecord = map[string]any{
 	"infrastructure":   "aws",
 	"regions": []map[string]any{
 		{
-			"name":         "US East 2",
-			"template":     "aws-account-hashicorp-ddr",
+			"name":          "US East 2",
+			"template":      "aws-account-hashicorp-ddr",
 			"requestMethod": "aws-account-hashicorp-ddr",
-			"cloudAccount": "ITZ",
-			"geo":          "",
-			"region":       "us-east-2",
-			"datacenter":   "",
-			"status":       "Enabled",
+			"cloudAccount":  "ITZ",
+			"geo":           "",
+			"region":        "us-east-2",
+			"datacenter":    "",
+			"status":        "Enabled",
 			"pattern": map[string]any{
 				"id":      "ccp-gitops/aws-account-hashicorp-ddr/itz",
 				"name":    "aws-account-hashicorp-ddr",
@@ -54,15 +54,15 @@ var platformRecord = map[string]any{
 
 // Fixed scalar constants from create.sh — never user inputs.
 var (
-	fixedOpportunity     = []string{"006Ka00000NPHdITZSTG"}
-	fixedIUI             = "2700013C3V"
-	fixedTemplate        = "aws-account-hashicorp-ddr"
-	fixedInfrastructure  = "aws"
-	fixedCloudAccount    = "ITZ"
-	fixedAccountPool     = "any"
-	fixedGeo             = "any"
-	fixedDescription     = "Terraform-managed reservation"
-	fixedAccountCleanup  = "true"
+	fixedOpportunity    = []string{"006Ka00000NPHdITZSTG"}
+	fixedIUI            = "2700013C3V"
+	fixedTemplate       = "aws-account-hashicorp-ddr"
+	fixedInfrastructure = "aws"
+	fixedCloudAccount   = "ITZ"
+	fixedAccountPool    = "any"
+	fixedGeo            = "any"
+	fixedDescription    = "Terraform-managed reservation"
+	fixedAccountCleanup = "true"
 )
 
 // ---------------------------------------------------------------------------
@@ -72,15 +72,15 @@ var (
 // CreateInput holds the fields that vary per reservation.
 // All other payload fields are fixed constants in this package.
 type CreateInput struct {
-	Name       string // payload "name" — reservation_name attribute
-	Purpose    string // payload "purpose"
-	User       string // payload "user" — user_email attribute
-	Region     string // payload "region" and "datacenter"
+	Name         string // payload "name" — reservation_name attribute
+	Purpose      string // payload "purpose"
+	User         string // payload "user" — user_email attribute
+	Region       string // payload "region" and "datacenter"
 	CollectionID string // payload "collectionId"
-	HCPOrg     string // dynamicOutputs _04_hcp_org
-	HCPProject string // dynamicOutputs _05_hcp_project
-	Start      string // ISO-8601 start timestamp (computed from now + 1 min)
-	End        string // ISO-8601 end timestamp (computed from now + duration)
+	HCPOrg       string // dynamicOutputs _04_hcp_org
+	HCPProject   string // dynamicOutputs _05_hcp_project
+	Start        string // ISO-8601 start timestamp (computed from now + 1 min)
+	End          string // ISO-8601 end timestamp (computed from now + duration)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,9 +122,9 @@ func BuildCreatePayload(in CreateInput) ([]byte, error) {
 			{"name": "_04_hcp_org", "value": in.HCPOrg},
 			{"name": "_05_hcp_project", "value": in.HCPProject},
 		},
-		"_03_account_cleanup": fixedAccountCleanup,
-		"_04_hcp_org":         in.HCPOrg,
-		"_05_hcp_project":     in.HCPProject,
+		"_03_account_cleanup":  fixedAccountCleanup,
+		"_04_hcp_org":          in.HCPOrg,
+		"_05_hcp_project":      in.HCPProject,
 		"reservationpurpose-0": "Demo",
 		"accountPool":          fixedAccountPool,
 		"geo":                  fixedGeo,

@@ -14,7 +14,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
 )
 
 // Ensure reservationDataSource satisfies the datasource.DataSource interface.
@@ -23,7 +22,7 @@ var _ datasource.DataSource = &reservationDataSource{}
 // reservationDataSource implements the techzone_reservation data source
 // (read-only lookup by ID — no prune, no lifecycle management).
 type reservationDataSource struct {
-	client *techzone.Client
+	pd *providerData
 }
 
 // reservationDataSourceModel is the Terraform state model for the data source.
@@ -93,21 +92,26 @@ func (d *reservationDataSource) Configure(_ context.Context, req datasource.Conf
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*techzone.Client)
+	pd, ok := req.ProviderData.(*providerData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected provider data type",
-			"Expected *techzone.Client in ProviderData.",
+			"Expected *providerData in ProviderData.",
 		)
 		return
 	}
-	d.client = client
+	d.pd = pd
 }
 
 func (d *reservationDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
-	if d.client == nil {
+	if d.pd == nil || d.pd.Client == nil {
 		resp.Diagnostics.AddError("Provider not configured",
 			"The provider has no api_key configured.")
+		return
+	}
+	// Token gate: data source Read is load-bearing (audit fix Sho-B #2).
+	if d.pd.TokenErr != nil {
+		resp.Diagnostics.AddError("TECHZONE_API_KEY is invalid or expired", d.pd.TokenErr.Error())
 		return
 	}
 
@@ -123,7 +127,7 @@ func (d *reservationDataSource) Read(ctx context.Context, req datasource.ReadReq
 		return
 	}
 
-	httpStatus, body, err := d.client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+	httpStatus, body, err := d.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
 	if err != nil {
 		resp.Diagnostics.AddError("TechZone API unreachable",
 			fmt.Sprintf("GET /api/reservation/aws/%s: %s", reservationID, err.Error()))
@@ -152,8 +156,8 @@ func (d *reservationDataSource) Read(ctx context.Context, req datasource.ReadReq
 
 	// Map to data source model (no prune — caller decides what to do with the status).
 	state := reservationDataSourceModel{
-		ID:        types.StringValue(reservationID),
-		Status:    types.StringValue(derefString(apiResp.Status)),
+		ID:     types.StringValue(reservationID),
+		Status: types.StringValue(derefString(apiResp.Status)),
 		StartDate: types.StringValue(firstNonEmpty(
 			derefString(apiResp.ProvisionDate),
 			derefString(apiResp.Start),

@@ -405,7 +405,7 @@ func TestIsTerminalStatus(t *testing.T) {
 
 		// --- live / non-terminal states: false (KEEP) ---
 
-		{name: "Ready",        status: "Ready",        want: false},
+		{name: "Ready", status: "Ready", want: false},
 		{name: "Provisioning", status: "Provisioning", want: false},
 		// F-4: "Queued" is a real live state observed in the wild.
 		// A case-insensitive match would treat "Queued" as non-terminal correctly,
@@ -419,17 +419,17 @@ func TestIsTerminalStatus(t *testing.T) {
 		// These rows are the critical proof that the implementation does NOT use
 		// EqualFold.  If it did, "deleted" would return true (PRUNE), causing
 		// live reservations whose status is returned in unexpected case to flap.
-		{name: "lowercase_deleted_F4",  status: "deleted", want: false},
-		{name: "uppercase_DELETED_F4",  status: "DELETED", want: false},
-		{name: "lowercase_expired_F4",  status: "expired", want: false},
-		{name: "uppercase_EXPIRED_F4",  status: "EXPIRED", want: false},
+		{name: "lowercase_deleted_F4", status: "deleted", want: false},
+		{name: "uppercase_DELETED_F4", status: "DELETED", want: false},
+		{name: "lowercase_expired_F4", status: "expired", want: false},
+		{name: "uppercase_EXPIRED_F4", status: "EXPIRED", want: false},
 		{name: "mixed_case_dEleted_F4", status: "dEleted", want: false},
 
 		// --- edge values ---
 
-		{name: "empty_string",         status: "",          want: false},
-		{name: "unknown_Foo",           status: "Foo",       want: false},
-		{name: "hypothetical_Archiving",status: "Archiving", want: false},
+		{name: "empty_string", status: "", want: false},
+		{name: "unknown_Foo", status: "Foo", want: false},
+		{name: "hypothetical_Archiving", status: "Archiving", want: false},
 	}
 
 	for _, tc := range rows {

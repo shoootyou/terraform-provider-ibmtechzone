@@ -34,11 +34,11 @@ import (
 //
 // This test operates at the techzone.Client level (not the full Terraform CLI
 // acceptance layer) because:
-//   1. It needs to inject a controlled log context via tflogtest.RootLogger.
-//   2. The full TF_ACC layer runs in a subprocess; intercepting its log output
-//      requires parsing TF_LOG files, which is fragile and platform-dependent.
-//   3. The client is the choke-point for all HTTP calls — any logging the provider
-//      does around HTTP requests goes through DoGet/DoPost/DoDelete.
+//  1. It needs to inject a controlled log context via tflogtest.RootLogger.
+//  2. The full TF_ACC layer runs in a subprocess; intercepting its log output
+//     requires parsing TF_LOG files, which is fragile and platform-dependent.
+//  3. The client is the choke-point for all HTTP calls — any logging the provider
+//     does around HTTP requests goes through DoGet/DoPost/DoDelete.
 //
 // If the client or provider ever adds a tflog.Debug/Info/Trace call that formats
 // the api_key, this test will catch it.
