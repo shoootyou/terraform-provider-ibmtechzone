@@ -24,6 +24,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
 )
 
@@ -376,17 +377,38 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 
 		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/"+reservationID)
 		if pollErr != nil {
-			// Transient connectivity error — log and retry.
+			tflog.Warn(ctx, "Poll connectivity error, retrying", map[string]any{
+				"reservation_id": reservationID,
+				"attempt":        attempt,
+				"error":          pollErr.Error(),
+			})
 			continue
 		}
 		if pollStatus < 200 || pollStatus >= 300 {
-			// Transient non-2xx — retry (bounded).
+			tflog.Warn(ctx, "Poll returned non-2xx status, retrying", map[string]any{
+				"reservation_id": reservationID,
+				"attempt":        attempt,
+				"http_status":    pollStatus,
+				"body_preview":   truncate(pollBody, 200),
+			})
 			continue
 		}
 
 		var pollResp tzPollResponse
-		if err := json.Unmarshal(pollBody, &pollResp); err != nil || pollResp.Status == nil {
-			// Non-JSON or status-less body — retry.
+		if err := json.Unmarshal(pollBody, &pollResp); err != nil {
+			tflog.Warn(ctx, "Poll response unmarshal error, retrying", map[string]any{
+				"reservation_id":  reservationID,
+				"attempt":         attempt,
+				"unmarshal_error": err.Error(),
+			})
+			continue
+		}
+		if pollResp.Status == nil {
+			tflog.Warn(ctx, "Poll response missing status field, retrying", map[string]any{
+				"reservation_id": reservationID,
+				"attempt":        attempt,
+				"body_preview":   truncate(pollBody, 200),
+			})
 			continue
 		}
 
@@ -405,8 +427,13 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 			)
 			return
 		case "Ready":
-			// Break out of the poll loop.
 			goto pollDone
+		default:
+			tflog.Trace(ctx, "Poll returned non-terminal status, continuing", map[string]any{
+				"reservation_id": reservationID,
+				"attempt":        attempt,
+				"status":         s,
+			})
 		}
 	}
 
@@ -423,6 +450,11 @@ pollDone:
 	for attempt := int64(0); attempt < maxAttempts; attempt++ {
 		canStatus, canBody, canErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
 		if canErr != nil {
+			tflog.Warn(ctx, "Final GET connectivity error, retrying", map[string]any{
+				"reservation_id": reservationID,
+				"attempt":        attempt,
+				"error":          canErr.Error(),
+			})
 			select {
 			case <-ctx.Done():
 				resp.Diagnostics.AddError("Context cancelled", "Interrupted during final read after reservation became Ready.")
@@ -432,6 +464,12 @@ pollDone:
 			continue
 		}
 		if canStatus < 200 || canStatus >= 300 {
+			tflog.Warn(ctx, "Final GET returned non-2xx status, retrying", map[string]any{
+				"reservation_id": reservationID,
+				"attempt":        attempt,
+				"http_status":    canStatus,
+				"body_preview":   truncate(canBody, 200),
+			})
 			select {
 			case <-ctx.Done():
 				resp.Diagnostics.AddError("Context cancelled", "Interrupted during final read after reservation became Ready.")
@@ -442,6 +480,11 @@ pollDone:
 		}
 		var r2 tzReservationResponse
 		if err := json.Unmarshal(canBody, &r2); err != nil {
+			tflog.Warn(ctx, "Final GET unmarshal error, retrying", map[string]any{
+				"reservation_id":  reservationID,
+				"attempt":         attempt,
+				"unmarshal_error": err.Error(),
+			})
 			select {
 			case <-ctx.Done():
 				resp.Diagnostics.AddError("Context cancelled", "Interrupted during final read after reservation became Ready.")
