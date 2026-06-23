@@ -1,6 +1,9 @@
 # Changelog
 
-All notable changes to `terraform-provider-techzone` are documented in this file.
+All notable changes to `terraform-provider-techzone` are documented here.
+Entries from v1.0.0 onward are generated automatically by [release-please](https://github.com/googleapis/release-please) from [Conventional Commits](https://www.conventionalcommits.org/).
+
+<!-- release-please inserts new entries above this line -->
 
 ## [0.4.0] - 2026-06-23
 
