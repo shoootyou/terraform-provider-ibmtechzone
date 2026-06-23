@@ -375,7 +375,7 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 			}
 		}
 
-		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/"+reservationID)
+		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
 		if pollErr != nil {
 			tflog.Warn(ctx, "Poll connectivity error, retrying", map[string]any{
 				"reservation_id": reservationID,

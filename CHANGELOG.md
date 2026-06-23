@@ -2,6 +2,11 @@
 
 All notable changes to `terraform-provider-techzone` are documented in this file.
 
+## [0.4.0] - 2026-06-23
+
+### Fixed
+- Poll loop used `GET /api/reservation/<id>` which does not exist — TechZone returns `302 → /api/reservation/unknown/<id>` for every request to that path. Fixed to `GET /api/reservation/aws/<id>`, matching the canonical final GET. This was the root cause of every Create timeout since v0.1.0.
+
 ## [0.3.0] - 2026-06-23
 
 ### Fixed
