@@ -2,6 +2,11 @@
 
 All notable changes to `terraform-provider-techzone` are documented in this file.
 
+## [0.3.0] - 2026-06-23
+
+### Fixed
+- Poll loop and final canonical GET no longer silently swallow errors. All retry paths (connectivity error, non-2xx HTTP status, JSON unmarshal failure, missing `status` field) now emit `tflog.Warn` diagnostics visible with `TF_LOG=warn`. Previously a 30-minute apply timeout produced zero diagnostic output, making root-cause analysis impossible.
+
 ## [0.2.0] - 2026-06-23
 
 ### Changed
