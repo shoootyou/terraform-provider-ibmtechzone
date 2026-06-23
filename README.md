@@ -9,7 +9,7 @@ terraform {
   required_providers {
     techzone = {
       source  = "app.terraform.io/hashicorp-ddr-platform-dev/techzone"
-      version = "~> 0.4"
+      version = "~> 1.0"
     }
   }
 }

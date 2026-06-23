@@ -1,36 +1,34 @@
-# Resource: techzone_reservation
+# techzone_reservation (Resource)
 
-Manages an IBM TechZone AWS account reservation. When applied, the provider
-submits a reservation request to TechZone, polls until the reservation reaches
-`Ready` status, and stores the resulting service links and dates in state.
+Manages an IBM TechZone AWS account reservation. The provider submits a reservation
+request to TechZone, polls until the reservation reaches `Ready` status (configurable
+via `timeout_minutes`), and stores the resulting service links and dates in state.
 
-## Key behaviors
+During `terraform refresh` and `terraform plan`, the resource prunes itself from
+state automatically when the reservation has expired or been deleted upstream — the
+next `apply` recreates it. `Delete` is idempotent and preserves state on auth
+failure so the operator can refresh their token and retry without re-importing.
 
-- **Poll-to-Ready**: `Create` polls `GET /api/reservation/aws/<id>` every 10 seconds
-  until the status is `Ready` or the `timeout_minutes` limit is reached.
-- **Prune-on-expiry**: `Read` removes the resource from state automatically if the
-  reservation returns HTTP 404, has a terminal status (`Deleted` or `Expired`), or
-  has a `provisionUntil` date in the past. The next `apply` will recreate it.
-- **Idempotent delete**: `Delete` treats HTTP 200, 204, and 404 as success.
-  State is preserved (not cleared) on auth-failure status codes (302/401/403) so
-  the operator can refresh their token and retry without re-importing.
-
-## Example usage
+## Example Usage
 
 ```hcl
+data "techzone_token_validation" "check" {}
+
 resource "techzone_reservation" "example" {
-  collection_id = "abc123def456"
-  user_email    = "user@example.com"
-  hcp_org       = "org-XXXXXXXX"
-  hcp_project   = "project-XXXXXXXX"
+  depends_on = [data.techzone_token_validation.check]
+
+  collection_id = "abc123def456789"
+  user_email    = "rodolfo.castelo@hashicorp.com"
+  hcp_org       = "org-AbCdEfGh"
+  hcp_project   = "project-XxYyZz12"
 
   # Optional — shown with non-default values
-  template                 = "aws-account-hashicorp-ddr"
-  region                   = "us-west-2"
-  reservation_name         = "My Demo"
-  purpose                  = "Demo"
+  template                  = "aws-account-hashicorp-ddr"
+  region                    = "us-west-2"
+  reservation_name          = "DDR Demo — West"
+  purpose                   = "Demo"
   reservation_duration_days = 2
-  timeout_minutes          = 45
+  timeout_minutes           = 45
 }
 
 output "aws_console_url" {
@@ -41,73 +39,69 @@ output "aws_console_url" {
 }
 ```
 
-## Argument reference
+## Argument Reference
 
-### Required
+The following arguments are supported:
 
-| Argument | Type | Description |
-|---|---|---|
-| `collection_id` | String | TechZone collection ID for the reservation. |
-| `user_email` | String | IBM ID (email) of the reservation owner. Used in the delete payload as `IBMID`. |
-| `hcp_org` | String | HCP organization ID, injected as a dynamic output on the reservation. |
-| `hcp_project` | String | HCP project ID, injected as a dynamic output on the reservation. |
+* `collection_id` - (Required) TechZone collection ID for this reservation.
+  Changing this value forces a new resource.
 
-### Optional
+* `user_email` - (Required) IBM ID (email address) of the reservation owner.
+  Also used as the `IBMID` field in the delete payload.
+  Changing this value forces a new resource.
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `template` | String | `aws-account-hashicorp-ddr` | TechZone template name. Changing this value forces replacement. |
-| `region` | String | `us-east-2` | AWS region for the reservation. Changing this value forces replacement. |
-| `reservation_name` | String | `Hashicorp DDR` | Display name for the reservation. Changing this value forces replacement. |
-| `purpose` | String | `Demo` | Reservation purpose. Changing this value forces replacement. |
-| `reservation_duration_days` | Int | `1` | Duration in days, applied at create time only. Changing this value **does not** modify the existing reservation; the new duration takes effect on the next recreate. |
-| `timeout_minutes` | Int | `30` | Maximum minutes to wait for `Ready` status during create. Changing this value **does not** trigger replacement. |
+* `hcp_org` - (Required) HCP organization ID, injected as a dynamic output into
+  the reservation. Changing this value forces a new resource.
 
-## Attribute reference
+* `hcp_project` - (Required) HCP project ID, injected as a dynamic output into
+  the reservation. Changing this value forces a new resource.
 
-| Attribute | Type | Description |
-|---|---|---|
-| `id` | String | TechZone reservation ID. |
-| `status` | String | Current reservation status (e.g. `Ready`, `Provisioning`). |
-| `service_links` | List of objects | Service links attached to the reservation. Each object has `type` (String) and `url` (String). |
-| `start_date` | String | ISO-8601 provision start date, sourced from `provisionDate` (with fallback to `start` → `startDate`). |
-| `end_date` | String | ISO-8601 provision end date, sourced from `provisionUntil` (with fallback to `end` → `endDate`). |
+* `template` - (Optional) TechZone template name. Defaults to
+  `aws-account-hashicorp-ddr`. Changing this value forces a new resource.
+
+* `region` - (Optional) AWS region for the reservation. Defaults to `us-east-2`.
+  Changing this value forces a new resource.
+
+* `reservation_name` - (Optional) Display name for the reservation. Defaults to
+  `Hashicorp DDR`. Changing this value forces a new resource.
+
+* `purpose` - (Optional) Reservation purpose. Defaults to `Demo`. Changing this
+  value forces a new resource.
+
+* `reservation_duration_days` - (Optional, Number) Duration in days at create time.
+  Defaults to `1`. Changing this value does **not** modify the existing reservation;
+  the new duration applies on the next replacement.
+
+* `timeout_minutes` - (Optional, Number) Maximum minutes to wait for the reservation
+  to reach `Ready` status. Defaults to `30`. Changing this value does not force a
+  new resource.
+
+## Attribute Reference
+
+In addition to all arguments above, the following computed attributes are exported:
+
+* `id` - The TechZone reservation ID.
+
+* `status` - Current reservation status (e.g. `Ready`, `Provisioning`).
+
+* `service_links` - List of service link objects attached to the reservation.
+  Each object contains:
+  * `type` - Service link type (e.g. `AWS Console`).
+  * `url` - Service link URL.
+
+* `start_date` - Reservation start date (ISO-8601), sourced from `provisionDate`
+  (with fallback to `start` → `startDate`).
+
+* `end_date` - Reservation end date (ISO-8601), sourced from `provisionUntil`
+  (with fallback to `end` → `endDate`).
 
 ## Import
 
-Existing reservations can be imported using the TechZone reservation ID:
+Reservations can be imported using the TechZone reservation ID:
 
-```
+```sh
 terraform import techzone_reservation.example <reservation-id>
 ```
 
-After import, run `terraform plan` to confirm the state matches the live reservation.
-
-## Lifecycle notes
-
-### Identity vs. operational attributes
-
-**Identity attributes** — changes force resource replacement (destroy + create):
-
-- `template`, `region`, `reservation_name`, `purpose`
-- `collection_id`, `user_email`, `hcp_org`, `hcp_project`
-
-**Operational attributes** — changes are applied in-place with no API calls:
-
-- `reservation_duration_days`, `timeout_minutes`
-
-### Prune rules
-
-`Read` removes the resource from state (triggering recreate on next apply) when:
-
-1. The API returns HTTP 404.
-2. The reservation status is `Deleted` or `Expired`.
-3. The `provisionUntil` date is in the past.
-
-### Token expiry behavior
-
-| Operation | Expired token behavior |
-|---|---|
-| `Create` | Fails immediately with `TECHZONE_API_KEY is invalid or expired`. |
-| `Read` (during `terraform plan`) | Returns silently, leaving state unchanged, so `terraform destroy` can proceed. |
-| `Delete` | Ignores the token probe result and attempts the delete. If TechZone returns 302/401/403, the error is surfaced and **state is preserved** so the operator can refresh the token and retry. |
+~> **Note** Importing a reservation only populates the `id` field. A subsequent
+`terraform plan` will fetch the full state from the TechZone API.
