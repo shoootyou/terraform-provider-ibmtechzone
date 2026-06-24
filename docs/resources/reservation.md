@@ -18,7 +18,7 @@ data "techzone_token_validation" "check" {}
 resource "techzone_reservation" "example" {
   depends_on = [data.techzone_token_validation.check]
 
-  collection_id = "abc123def456789"
+  collection_id = "5f43a1b2c3d4e5f6a7b8c9d0"
   user_email    = "user@example.com"
 
   # dynamic_outputs: opaque _NN_ keys injected into the reservation payload.
@@ -30,7 +30,6 @@ resource "techzone_reservation" "example" {
   }
 
   # Optional — shown with non-default values
-  region                    = "us-west-2"
   reservation_name          = "My Awesome Reservation"
   purpose                   = "Learning"
   reservation_duration_days = 2
@@ -50,9 +49,15 @@ output "aws_console_url" {
 The following arguments are supported:
 
 * `collection_id` - (Required) TechZone collection ID for this reservation.
-  The provider fetches `GET /api/collection/<id>` to derive the platform,
-  template, region, and cloud-account fields for the reservation payload.
-  Changing this value forces a new resource.
+  Must be a **24-character hexadecimal string** (MongoDB ObjectID format,
+  e.g. `5f43a1b2c3d4e5f6a7b8c9d0`). The schema validator enforces this format
+  at plan time — an invalid value is rejected before any API call is made.
+
+  The provider fetches `GET /api/collection/<id>` at create time to derive the
+  platform, template, region, and cloud-account fields for the reservation
+  payload. The token must have read access to the collection; 401/403 responses
+  are treated as "not found" (access-gated collections are indistinguishable
+  from non-existent ones). Changing this value forces a new resource.
 
 * `user_email` - (Required) IBM ID (email address) of the reservation owner.
   Also used as the `IBMID` field in the delete payload.
@@ -65,12 +70,16 @@ The following arguments are supported:
   2. Flat top-level keys using the same names (dual-emit).
 
   An empty map (`{}`) is valid: it produces `"dynamicOutputs": []` and no flat
-  keys. Keys must follow the `_NN_name` convention used by TechZone dynamic
-  outputs (e.g. `_04_hcp_org`, `_05_hcp_project`).
+  keys. Keys conventionally follow the `_NN_name` pattern used by TechZone
+  dynamic outputs (e.g. `_04_hcp_org`, `_05_hcp_project`), but the provider
+  does not validate key format — the naming convention is enforced by TechZone,
+  not the schema. Keys must not collide with reserved payload fields (the
+  provider returns a plan-time error if they do).
   Changing this value forces a new resource.
 
-* `region` - (Optional) AWS region for the reservation. Defaults to `us-east-2`.
-  Changing this value forces a new resource.
+* `region` - (Optional) AWS region override. Defaults to `us-east-2`.
+  When omitted, the default is applied automatically — no explicit value is
+  required in config. Changing this value forces a new resource.
 
 * `reservation_name` - (Optional) Display name for the reservation.
   Changing this value forces a new resource.
