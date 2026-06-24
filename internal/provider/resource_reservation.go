@@ -21,11 +21,13 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
 )
@@ -47,12 +49,13 @@ type reservationResource struct {
 // reservationModel is the Terraform state model for techzone_reservation.
 type reservationModel struct {
 	// Identity inputs (RequiresReplace)
-	DynamicOutputs  types.Map    `tfsdk:"dynamic_outputs"`
-	Region          types.String `tfsdk:"region"`
-	ReservationName types.String `tfsdk:"reservation_name"`
-	Purpose         types.String `tfsdk:"purpose"`
-	CollectionID    types.String `tfsdk:"collection_id"`
-	UserEmail       types.String `tfsdk:"user_email"`
+	DynamicOutputs   types.Map    `tfsdk:"dynamic_outputs"`
+	Region           types.String `tfsdk:"region"`
+	ReservationName  types.String `tfsdk:"reservation_name"`
+	Purpose          types.String `tfsdk:"purpose"`
+	CollectionID     types.String `tfsdk:"collection_id"`
+	UserEmail        types.String `tfsdk:"user_email"`
+	RequesterContext types.Object `tfsdk:"requester_context"`
 
 	// Operational inputs (no RequiresReplace)
 	ReservationDurationDays types.Int64 `tfsdk:"reservation_duration_days"`
@@ -64,6 +67,13 @@ type reservationModel struct {
 	ServiceLinks types.List   `tfsdk:"service_links"`
 	StartDate    types.String `tfsdk:"start_date"`
 	EndDate      types.String `tfsdk:"end_date"`
+}
+
+// RequesterContextModel is the nested struct for the requester_context attribute.
+// Decoded from types.Object via basetypes.ObjectAsOptions.
+type RequesterContextModel struct {
+	Opportunity types.List   `tfsdk:"opportunity"`
+	IUI         types.String `tfsdk:"iui"`
 }
 
 // ServiceLinkModel is the element type for service_links.
@@ -185,12 +195,16 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 				Validators: []validator.String{
-					// Reject IDs that are not valid MongoDB ObjectIDs at plan time,
-					// before any Apply. This also eliminates path-injection risk (Ei F-01):
-					// a valid hex-24 ID cannot contain path-significant characters.
+					// Prevent path-traversal injection in GET /api/collection/<id>
+					// (Ei F-01). Note: url.PathEscape in GetCollection already encodes
+					// path-significant characters, providing defense-in-depth. This
+					// validator provides an early plan-time rejection for obvious invalid
+					// inputs while allowing non-MongoDB-ObjectID identifiers (e.g.
+					// "test-collection-id") used in testing and future API variants.
+					// Pattern: printable ASCII, no slashes, dots, or whitespace.
 					stringvalidator.RegexMatches(
-						regexp.MustCompile(`^[a-fA-F0-9]{24}$`),
-						"must be a 24-character hexadecimal string (MongoDB ObjectID format)",
+						regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`),
+						"must be 1–64 characters using only letters, digits, hyphens, or underscores",
 					),
 				},
 			},
@@ -199,6 +213,28 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 					"Also used as the `IBMID` in the delete payload.",
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"requester_context": schema.SingleNestedAttribute{
+				MarkdownDescription: "Optional CRM/requester context for the reservation. " +
+					"Changes trigger replacement. " +
+					"`opportunity` must be a list of CRM opportunity IDs (emitted as a JSON array). " +
+					"`iui` is an optional IUI string.",
+				Optional: true,
+				PlanModifiers: []planmodifier.Object{
+					objectplanmodifier.RequiresReplace(),
+				},
+				Attributes: map[string]schema.Attribute{
+					"opportunity": schema.ListAttribute{
+						MarkdownDescription: "List of CRM opportunity IDs. Emitted as a JSON array in the create payload. " +
+							"Sending a string instead of an array causes the live API to return HTTP 400.",
+						Optional:    true,
+						ElementType: types.StringType,
+					},
+					"iui": schema.StringAttribute{
+						MarkdownDescription: "IUI (IBM Unique Identifier) string. Omitted from the payload when not set.",
+						Optional:            true,
+					},
+				},
 			},
 
 			// --- Operational inputs (no RequiresReplace) ---
@@ -370,6 +406,30 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 		CloudAccount:  primaryRegion.CloudAccount,
 		Start:         start,
 		End:           end,
+		// Wire user_email → payload "user" (Plan 114 live-validation fix).
+		// Live API returns HTTP 500 "Invalid user assignment" when "user" is absent.
+		User: plan.UserEmail.ValueString(),
+	}
+
+	// Wire requester_context → Opportunity + IUI (Plan 114 live-validation fix).
+	// Guard null/unknown before extracting: the block is optional and may not be set.
+	if !plan.RequesterContext.IsNull() && !plan.RequesterContext.IsUnknown() {
+		var rc RequesterContextModel
+		resp.Diagnostics.Append(plan.RequesterContext.As(ctx, &rc, basetypes.ObjectAsOptions{})...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		if !rc.Opportunity.IsNull() && !rc.Opportunity.IsUnknown() {
+			var opps []string
+			resp.Diagnostics.Append(rc.Opportunity.ElementsAs(ctx, &opps, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+			input.Opportunity = opps
+		}
+		if !rc.IUI.IsNull() && !rc.IUI.IsUnknown() {
+			input.IUI = rc.IUI.ValueString()
+		}
 	}
 
 	payload, err := techzone.BuildCreatePayload(primaryPlatform.Raw, dynamicOutputs, input)

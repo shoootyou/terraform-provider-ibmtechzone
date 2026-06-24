@@ -67,7 +67,6 @@ var reservedPayloadKeys = map[string]struct{}{
 // All other payload fields are fixed constants in this package.
 //
 // Fields removed from the old signature (E3 refactor):
-//   - User       — server derives identity from the bearer token (E8; never in payload)
 //   - HCPOrg     — now caller-supplied via dynamicOutputs map (E2 decision B1)
 //   - HCPProject — same as HCPOrg
 //
@@ -76,6 +75,13 @@ var reservedPayloadKeys = map[string]struct{}{
 //   - Template      — payload "template" (from collection region)
 //   - RequestMethod — payload "requestMethod" (from collection region)
 //   - CloudAccount  — payload "cloudAccount" (from collection region)
+//
+// Live-validation fix (Plan 114 E8):
+//   - User is REQUIRED — the live API returns HTTP 500 "Invalid user assignment" when
+//     absent. E8 decision was a misread: server uses the submitted value for myId
+//     assignment. Always emit "user" equal to CreateInput.User.
+//   - Opportunity is []string — sending a JSON string causes HTTP 400. Emitted as a
+//     JSON array when len > 0; omitted entirely when nil or empty.
 type CreateInput struct {
 	Name          string // payload "name"
 	Purpose       string // payload "purpose"
@@ -87,9 +93,11 @@ type CreateInput struct {
 	CloudAccount  string // payload "cloudAccount" (from collection region)
 	Start         string // ISO-8601 start timestamp
 	End           string // ISO-8601 end timestamp
+	// Required — live API returns HTTP 500 when absent (Plan 114 live-validation fix).
+	User string // payload "user" — always emitted
 	// Optional fields: absent from payload when zero-value.
-	Opportunity string // payload "opportunity" — omitted when ""
-	IUI         string // payload "iui" — omitted when ""
+	Opportunity []string // payload "opportunity" — emitted as JSON array when len>0; omitted when nil/empty
+	IUI         string   // payload "iui" — omitted when ""
 }
 
 // ---------------------------------------------------------------------------
@@ -134,9 +142,15 @@ type dynOutputEntry struct {
 //	opportunityProduct   = []
 //	notes                = ""
 //
-// Absent keys:
-//   - "user" is NEVER emitted (E8: server derives identity from bearer token).
-//   - "opportunity" is omitted when CreateInput.Opportunity == "".
+// Always-present keys:
+//   - "user" MUST be emitted — live API returns HTTP 500 "Invalid user assignment"
+//     when absent (Plan 114 live-validation fix; E8 decision was a misread).
+//   - "description" is always "Terraform-managed reservation".
+//
+// Conditionally-present keys:
+//   - "opportunity" is emitted as a JSON ARRAY when len(CreateInput.Opportunity) > 0;
+//     OMITTED entirely when the slice is nil or empty. Sending a string instead of an
+//     array causes the live API to return HTTP 400.
 //   - "iui" is omitted when CreateInput.IUI == "".
 func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]string, in CreateInput) ([]byte, error) {
 	// Guard 1 — json.Valid check at entry point (audit remediation item 2).
@@ -174,7 +188,6 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 	}
 
 	// Core payload — fixed and variable scalar fields.
-	// "user" is intentionally absent (E8).
 	payload := map[string]any{
 		// Variable fields from CreateInput.
 		"name":          in.Name,
@@ -187,6 +200,13 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 		"cloudAccount":  in.CloudAccount,
 		"start":         in.Start,
 		"end":           in.End,
+
+		// "user": ALWAYS emitted — live API returns HTTP 500 when absent (Plan 114
+		// live-validation fix). E8 decision was a misread; server uses this for myId.
+		"user": in.User,
+
+		// "description": constant — always present (live API expects it).
+		"description": "Terraform-managed reservation",
 
 		// platform: verbatim bytes from the collection API response.
 		// json.RawMessage implements json.Marshaler and is embedded as-is —
@@ -217,10 +237,12 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 		payload[k] = dynamicOutputs[k]
 	}
 
-	// Optional fields: emit only when non-empty.
-	if in.Opportunity != "" {
+	// "opportunity": emitted as a JSON ARRAY when len > 0; OMITTED when nil/empty.
+	// Sending a string instead of an array causes HTTP 400 from the live API.
+	if len(in.Opportunity) > 0 {
 		payload["opportunity"] = in.Opportunity
 	}
+	// "iui": emitted as a string when non-empty; omitted otherwise.
 	if in.IUI != "" {
 		payload["iui"] = in.IUI
 	}

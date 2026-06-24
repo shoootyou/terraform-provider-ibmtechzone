@@ -180,6 +180,14 @@ func TestReservationModel_DynamicOutputs_RoundTrip(t *testing.T) {
 	// COMPILE-FAIL RED: reservationModel currently has Template/HCPOrg/HCPProject
 	// and does NOT have DynamicOutputs. This literal will not compile until Kou
 	// updates the struct in E5 Task 2.
+	//
+	// E8 (Plan 114): RequesterContext added to schema — must be a typed null
+	// object (not the zero-value types.Object{}) so that the Framework can
+	// validate the attribute type against the schema.
+	rcAttrTypesForDynTest := map[string]attr.Type{
+		"opportunity": types.ListType{ElemType: types.StringType},
+		"iui":         types.StringType,
+	}
 	m := reservationModel{
 		DynamicOutputs:          dynMap,
 		Region:                  types.StringValue("us-east-2"),
@@ -187,6 +195,7 @@ func TestReservationModel_DynamicOutputs_RoundTrip(t *testing.T) {
 		Purpose:                 types.StringValue("Demo"),
 		CollectionID:            types.StringValue("test-collection-id"),
 		UserEmail:               types.StringValue("test@example.com"),
+		RequesterContext:        types.ObjectNull(rcAttrTypesForDynTest),
 		ReservationDurationDays: types.Int64Value(1),
 		TimeoutMinutes:          types.Int64Value(30),
 		ID:                      types.StringValue("res-123"),
@@ -291,6 +300,13 @@ func buildDeleteStateV2(t *testing.T, s rschema.Schema, reservationID string) tf
 
 	// New-contract model: no Template/HCPOrg/HCPProject; DynamicOutputs present.
 	// COMPILE-FAIL RED until Kou updates reservationModel.
+	//
+	// E8 (Plan 114): RequesterContext typed-null added to satisfy schema type
+	// validation after requester_context attribute was added to the schema.
+	rcAttrTypesForV2 := map[string]attr.Type{
+		"opportunity": types.ListType{ElemType: types.StringType},
+		"iui":         types.StringType,
+	}
 	m := reservationModel{
 		DynamicOutputs:          dynMap,
 		Region:                  types.StringValue("us-east-2"),
@@ -298,6 +314,7 @@ func buildDeleteStateV2(t *testing.T, s rschema.Schema, reservationID string) tf
 		Purpose:                 types.StringValue("Demo"),
 		CollectionID:            types.StringValue("test-collection-id"),
 		UserEmail:               types.StringValue("test@example.com"),
+		RequesterContext:        types.ObjectNull(rcAttrTypesForV2),
 		ReservationDurationDays: types.Int64Value(1),
 		TimeoutMinutes:          types.Int64Value(30),
 		ID:                      types.StringValue(reservationID),

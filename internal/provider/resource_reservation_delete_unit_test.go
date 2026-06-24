@@ -87,8 +87,18 @@ func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsd
 		t.Fatalf("building dynamic_outputs map: %v", dynDiags)
 	}
 
+	// E8 (Plan 114): RequesterContext is now part of the schema. The Framework
+	// requires a typed null object (not the zero-value types.Object{}) so that
+	// the attribute types match the schema definition. requester_context is
+	// Optional and absent in the Delete path — null is the correct representation.
+	rcAttrTypes := map[string]attr.Type{
+		"opportunity": types.ListType{ElemType: types.StringType},
+		"iui":         types.StringType,
+	}
+	nullRC := types.ObjectNull(rcAttrTypes)
+
 	// New-contract model: Template/HCPOrg/HCPProject removed; DynamicOutputs added.
-	// COMPILE-FAIL RED until Kou updates reservationModel.
+	// E8: RequesterContext null object added to satisfy schema type validation.
 	m := reservationModel{
 		DynamicOutputs:          dynMap,
 		Region:                  types.StringValue("us-east-2"),
@@ -96,6 +106,7 @@ func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsd
 		Purpose:                 types.StringValue("Demo"),
 		CollectionID:            types.StringValue("test-collection-id"),
 		UserEmail:               types.StringValue("test@example.com"),
+		RequesterContext:        nullRC,
 		ReservationDurationDays: types.Int64Value(1),
 		TimeoutMinutes:          types.Int64Value(30),
 		ID:                      types.StringValue(reservationID),
