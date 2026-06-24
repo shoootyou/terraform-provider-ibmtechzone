@@ -10,9 +10,9 @@ import (
 )
 
 // Registry source address used for local development and CI.
-// The real TFC private registry source (app.terraform.io/hashicorp-ddr-platform-{dev,prod}/techzone)
-// is wired in the consuming module's required_providers block at distribution time (RFC §8.1).
-const providerAddress = "registry.terraform.io/hashicorp-ddr-platform/techzone"
+// The public registry source is registry.terraform.io/shoootyou/ibmtechzone;
+// consuming modules reference this address in their required_providers block.
+const providerAddress = "registry.terraform.io/shoootyou/ibmtechzone"
 
 func main() {
 	var debug bool
