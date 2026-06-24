@@ -5,6 +5,24 @@ Entries from v1.0.0 onward are generated automatically by [release-please](https
 
 <!-- release-please inserts new entries above this line -->
 
+## [1.0.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v0.4.0...v1.0.0) (2026-06-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* provider now follows semantic versioning with automated releases via release-please. Manual tagging is no longer required.
+
+### Features
+
+* All packages updated ([#1](https://github.com/shoootyou/terraform-provider-techzone/issues/1)) ([03dcd56](https://github.com/shoootyou/terraform-provider-techzone/commit/03dcd5627b153a772bb35c903391973ca9870b51))
+* automated release pipeline + stable v1.0.0 ([834624b](https://github.com/shoootyou/terraform-provider-techzone/commit/834624b87ae48c3009e050494540b20f04c06a02))
+* First clean release ([#12](https://github.com/shoootyou/terraform-provider-techzone/issues/12)) ([3b53dee](https://github.com/shoootyou/terraform-provider-techzone/commit/3b53dee0df727d0c861cb93546d1d81101ad2558))
+
+
+### Bug Fixes
+
+* add registry-compliant provider documentation ([e41a6fe](https://github.com/shoootyou/terraform-provider-techzone/commit/e41a6feef4c3a813146b7cfcf4d72cba634b0be7))
+
 ## [0.4.0] - 2026-06-23
 
 ### Fixed
