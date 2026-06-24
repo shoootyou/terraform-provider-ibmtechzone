@@ -5,6 +5,13 @@ Entries from v1.0.0 onward are generated automatically by [release-please](https
 
 <!-- release-please inserts new entries above this line -->
 
+## [1.2.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.1.0...v1.2.0) (2026-06-24)
+
+
+### Features
+
+* Adding personal GPG key support ([#3](https://github.com/shoootyou/terraform-provider-techzone/issues/3)) ([10657da](https://github.com/shoootyou/terraform-provider-techzone/commit/10657dae7c705a4a19c8bae74776669f0f35aef2))
+
 ## [1.1.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.0.1...v1.1.0) (2026-06-24)
 
 
