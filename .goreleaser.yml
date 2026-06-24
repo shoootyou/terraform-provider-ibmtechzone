@@ -1,0 +1,86 @@
+# .goreleaser.yml — GoReleaser v2+ schema
+# Produces the signed multi-arch release artifacts required by the TFC private
+# provider registry (RFC §8.4). See RFC §8.2 for GPG key custody rules.
+#
+# Artifact set per release:
+#   terraform-provider-techzone_{version}_{os}_{arch}.zip  (one per target)
+#   terraform-provider-techzone_{version}_SHA256SUMS        (sha256 checksums)
+#   terraform-provider-techzone_{version}_SHA256SUMS.sig    (GPG signature over SHA256SUMS)
+#   terraform-provider-techzone_{version}_manifest.json     (registry protocol manifest)
+#
+# GPG signing uses the fingerprint in $GPG_FINGERPRINT — never a hardcoded key.
+# The signing key and fingerprint are stored in GitHub Actions secrets
+# (GPG_PRIVATE_KEY, GPG_FINGERPRINT) and never committed to the repository.
+version: 2
+
+before:
+  hooks:
+    - go mod verify
+    - go mod tidy
+
+builds:
+  - id: terraform-provider-techzone
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w -X main.version={{.Version}}"
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Exclude windows/arm64 — TFC runners do not use it.
+    ignore:
+      - goos: windows
+        goarch: arm64
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - id: terraform-provider-techzone
+    formats:
+      - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Include the registry manifest in every archive so TFC can resolve the
+    # protocol version without a separate manifest download step.
+    files:
+      - terraform-registry-manifest.json
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+signs:
+  - id: gpg-sign-checksums
+    # Sign only the SHA256SUMS file; the registry verifies this signature.
+    # $GPG_FINGERPRINT is set from the GitHub Actions secret at release time.
+    # --pinentry-mode loopback: required in CI — prevents GPG from opening a
+    # TTY to prompt for passphrase (causes "Inappropriate ioctl for device").
+    artifacts: checksum
+    args:
+      - "--batch"
+      - "--pinentry-mode"
+      - "loopback"
+      - "--local-user"
+      - "${GPG_FINGERPRINT}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
+
+release:
+  # Create a GitHub Release; the release workflow then uploads the artifacts to
+  # the TFC private registry (RFC §8.4 — Option A: GitHub Release first, then
+  # POST to registry upload-links API).
+  # owner/name resolved automatically from GITHUB_TOKEN context — no hardcoded
+  # repo reference so the config survives repository transfers.
+  extra_files:
+    - glob: terraform-registry-manifest.json
+
+# Do not create a changelog — this is a provider repo; changelogs are managed
+# separately in release notes.
+changelog:
+  disable: true
