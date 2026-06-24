@@ -5,6 +5,13 @@ Entries from v1.0.0 onward are generated automatically by [release-please](https
 
 <!-- release-please inserts new entries above this line -->
 
+## [1.2.1](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.2.0...v1.2.1) (2026-06-24)
+
+
+### Bug Fixes
+
+* goreleaser signing, archives format, remove hardcoded repo owner ([#5](https://github.com/shoootyou/terraform-provider-techzone/issues/5)) ([e23a15a](https://github.com/shoootyou/terraform-provider-techzone/commit/e23a15a7ac849cfb6ea74eb608109efa0ba861ca))
+
 ## [1.2.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.1.0...v1.2.0) (2026-06-24)
 
 
