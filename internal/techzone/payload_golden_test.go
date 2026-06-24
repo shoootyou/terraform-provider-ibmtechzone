@@ -61,6 +61,7 @@
 package techzone_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"testing"
@@ -161,43 +162,40 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 		assertStringField(t, got, "name", "golden-ddr")
 		assertStringField(t, got, "purpose", "Demo")
 
-		// --- D: platform — verbatim byte-identity ---
-		// We re-marshal the "platform" value from the unmarshalled map back to JSON,
-		// then compare against the canonical fixture.
-		// If BuildCreatePayload embedded platformRaw verbatim (json.RawMessage), the
-		// byte sequence will survive the unmarshal-remarshal cycle because encoding/json
-		// will decode the embedded raw bytes and then re-encode them — which for a
-		// well-formed JSON object is stable only if the impl used json.RawMessage
-		// (encoding/json re-encodes the RawMessage verbatim on the outer marshal).
+		// --- D: platform — RAW BYTE-IDENTITY (audit remediation item 7) ---
 		//
-		// The KEY ORDER assertion is critical: canonicalPlatformRaw has "oid" before
-		// "id" — non-alphabetical. If the impl decoded into map[string]any and re-encoded,
-		// encoding/json would sort keys alphabetically, making "id" appear before "oid".
-		// We detect this by unmarshalling the canonical fixture and the got["platform"]
-		// value, then re-marshalling both and asserting byte equality.
-		platformVal, ok := got["platform"]
-		if !ok {
-			t.Fatalf("FAIL: `platform` key is absent from payload")
-		}
-		// Re-marshal the got["platform"] value.
-		gotPlatformBytes, err := json.Marshal(platformVal)
-		if err != nil {
-			t.Fatalf("cannot re-marshal platform value: %v", err)
-		}
-		// Re-marshal the canonical fixture through the same encode-decode cycle to
-		// get the reference comparison (both go through unmarshal-remarshal, so any
-		// encoding/json normalization applies equally to both sides).
-		var canonicalPlatformParsed any
-		if err := json.Unmarshal(canonicalPlatformRaw, &canonicalPlatformParsed); err != nil {
-			t.Fatalf("cannot unmarshal canonicalPlatformRaw: %v", err)
-		}
-		canonicalPlatformReencoded, err := json.Marshal(canonicalPlatformParsed)
-		if err != nil {
-			t.Fatalf("cannot re-marshal canonical platform: %v", err)
-		}
-		if string(gotPlatformBytes) != string(canonicalPlatformReencoded) {
-			t.Errorf("FAIL: platform bytes mismatch\n  got:  %s\n  want: %s",
-				gotPlatformBytes, canonicalPlatformReencoded)
+		// TIGHTENED ASSERTION: We compare the raw JSON bytes of the "platform" value
+		// directly against canonicalPlatformRaw, WITHOUT any unmarshal-remarshal cycle.
+		//
+		// Previous implementation (WRONG): both sides went through json.Unmarshal →
+		// map[string]any → json.Marshal, which normalized key order alphabetically on
+		// BOTH sides — masking the reorder regression this test is supposed to catch.
+		// (Sho-core finding #1, Shin audit F-04)
+		//
+		// Correct implementation: extract the raw "platform" bytes from the outer JSON
+		// payload bytes using bytes.Index, then compare directly against canonicalPlatformRaw.
+		//
+		// KEY ORDER CONTRACT: canonicalPlatformRaw has "oid" before "id" (non-alphabetical).
+		// If BuildCreatePayload decoded platformRaw into map[string]any and re-encoded,
+		// encoding/json would sort keys to "id" before "oid". The raw-byte comparison
+		// detects this regression immediately — the bytes would NOT match because the
+		// re-encoded form has alphabetical order.
+		//
+		// The assertion uses bytes.Contains(gotBytes, canonicalPlatformRaw) rather than
+		// extracting and comparing the full sub-JSON, which is simpler and equally precise:
+		// the canonical raw bytes must appear verbatim as a subsequence in the output.
+		if !bytes.Contains(gotBytes, []byte(canonicalPlatformRaw)) {
+			t.Errorf(
+				"FAIL: platform bytes are NOT verbatim in the output payload\n"+
+					"  canonicalPlatformRaw (non-alphabetical key order, 'oid' before 'id') "+
+					"must appear byte-for-byte in the marshalled payload.\n"+
+					"  If BuildCreatePayload round-tripped platformRaw through map[string]any,\n"+
+					"  encoding/json would have alphabetized the keys, making 'id' appear before 'oid'.\n"+
+					"  This assertion catches that regression.\n"+
+					"  want (canonical raw): %s\n"+
+					"  got (full output):    %s",
+				canonicalPlatformRaw, gotBytes,
+			)
 		}
 
 		// --- E: dynamicOutputs array — lexicographically sorted (E10) ---
