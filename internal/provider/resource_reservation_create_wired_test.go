@@ -1,15 +1,20 @@
 /**
  * @spec-handoff
  *
- * @interface reservationResource.Create — wired Create path (post-E5 refactor)
+ * @interface reservationResource.Create — wired Create path (post-Plan-114 live fix)
  *
  * Full call graph:
  *   Create(ctx, req, resp)
- *     → c.GetCollection(ctx, plan.CollectionID)       // NEW: GET /api/collection/<id>
- *     → BuildCreatePayload(                            // NEW: 3-arg signature
+ *     → c.GetCollection(ctx, plan.CollectionID)       // GET /api/collection/<id>
+ *     → BuildCreatePayload(                            // 3-arg signature
  *           platforms[0].Raw,                          //   verbatim platform bytes
  *           plan.DynamicOutputs (map[string]string),   //   from TF config
- *           CreateInput{...},                          //   scalar fields from plan + collection
+ *           CreateInput{                               //   scalar fields
+ *             User:        plan.UserEmail,             //   REQUIRED — absent → HTTP 500
+ *             Opportunity: plan.RequesterContext.opportunity ([]string, when set),
+ *             IUI:         plan.RequesterContext.iui   (string, when set),
+ *             ...                                      //   collection-derived fields
+ *           },
  *       )
  *     → DoPost(ctx, "/api/reservation/aws", payload)   // unchanged
  *     → poll loop                                      // unchanged
@@ -22,16 +27,20 @@
  *   - On ErrUnsupportedInfrastructure from GetCollection: AddError with summary
  *     containing "unsupported" or "infrastructure"; no POST fired.
  *   - POST /api/reservation/aws body MUST satisfy ALL of:
- *       (a) NO "user" key at any level.
+ *       (a) "user" key PRESENT and equal to plan.UserEmail (user_email TF attribute).
+ *           Live API returns HTTP 500 "Invalid user assignment" when absent.
  *       (b) "dynamicOutputs" array is present, emitted in LEXICOGRAPHIC key order
  *           (name field of each element).
  *       (c) Each dynamic output ALSO emitted as a flat top-level key (dual-emit).
  *       (d) "platform" value is the VERBATIM bytes of platforms[0].Raw from the
  *           collection response — NOT re-encoded through a struct.
  *       (e) Scalar fields (region, collectionId, template, requestMethod,
- *           cloudAccount, datacenter) derived from the collection region, NOT
- *           from the TF config attributes that were removed (template, hcp_org,
- *           hcp_project are gone from the schema).
+ *           cloudAccount, datacenter) derived from the collection region.
+ *       (f) "description" = "Terraform-managed reservation" always present.
+ *       (g) "opportunity" emitted as a JSON ARRAY when requester_context.opportunity
+ *           is set; OMITTED when requester_context is absent/null.
+ *       (h) "iui" emitted as a string when requester_context.iui is set and non-empty;
+ *           OMITTED otherwise.
  *   - On empty dynamic_outputs (nil map from TF config): "dynamicOutputs": [] emitted,
  *     NO flat _NN_ keys; create still proceeds normally.
  *
@@ -40,13 +49,16 @@
  *     regexp `(?i)(collection|not found)`.
  *   - ErrUnsupportedInfrastructure → Terraform diagnostic, summary matches
  *     regexp `(?i)(unsupported|infrastructure)`.
- *   - Collection with valid AWS platform → POST fires; body validated per (a)–(e).
+ *   - Collection with valid AWS platform → POST fires; body validated per (a)–(h).
  *   - Token safety: sentinel must NOT appear in any diagnostic string.
+ *   - requester_context absent from HCL → "opportunity" and "iui" absent from POST body.
+ *   - requester_context present with opportunity list → "opportunity" in POST body is
+ *     a JSON array, NOT a string.
  *
  * @see ./resource_reservation.go      (Kou implements Create changes here)
  * @see ../techzone/collection.go      (GetCollection — already implemented)
- * @see ../techzone/payload.go         (BuildCreatePayload — new 3-arg signature)
- * @see ./testutil_mock_server_test.go (mock server — handleCollection added here)
+ * @see ../techzone/payload.go         (BuildCreatePayload — updated CreateInput)
+ * @see ./testutil_mock_server_test.go (mock server)
  * @see .yui-soul/plans/wip/114-techzone-template-agnostic/e5-schema-resource-wiring.md
  */
 
@@ -54,16 +66,21 @@
 
 package provider_test
 
-// E5 wired-Create acceptance tests.
+// Wired-Create acceptance tests (E5 + Plan 114 live-validation fix).
 //
-// RED GATE (E5 Task 1): these tests fail because:
-//   (a) resource_reservation.go does not compile — old BuildCreatePayload call +
-//       references to deleted CreateInput fields.
-//   (b) Even if it compiled, the mock's GET /api/collection/<id> handler is not
-//       yet wired in the provider's Create, so the create path would skip the
-//       collection fetch and use the wrong payload shape.
+// RED GATE (Plan 114 live fix): existing tests now also FAIL because:
+//   (a) CreateInput.User does not exist / Opportunity is string not []string →
+//       package compile error in payload.go / payload_golden_test.go.
+//   (b) Even if it compiled, the POST body would be missing "user" → assertion (a)
+//       in TestReservationCreate_Wired_PostBodyShape now expects user PRESENT.
+//   (c) "description" is absent from POST body → new assertion (f) fails.
+//   (d) TestReservationCreate_Wired_WithRequesterContext (NEW) requires
+//       requester_context in schema + wired Create → RED until Kou implements.
 //
-// Goes GREEN when Kou completes E5 Task 2 (Create calls GetCollection + new payload).
+// Goes GREEN when Kou:
+//   1. Adds User + []string Opportunity to CreateInput in payload.go.
+//   2. Adds requester_context to Schema() and RequesterContext to reservationModel.
+//   3. Wires user ← user_email and requester_context fields into CreateInput in Create().
 //
 // Run with:
 //   TF_ACC=1 go test ./internal/provider/ -run TestReservation -v -timeout 5m
@@ -176,21 +193,24 @@ resource "techzone_reservation" "test" {
 // Scenario: CREATE — happy path with DDR collection
 // ---------------------------------------------------------------------------
 
-// TestReservationCreate_Wired_PostBodyShape_NoBuildold verifies the full wired
-// Create path with the new 3-arg BuildCreatePayload:
+// TestReservationCreate_Wired_PostBodyShape verifies the full wired
+// Create path with the updated BuildCreatePayload:
 //
 //  1. Mock serves GET /api/collection/test-collection-id → ddrCollectionJSON
 //  2. Create builds the POST body using platforms[0].Raw (verbatim) + dynamic_outputs.
 //  3. Assertions on the captured POST body:
-//     (a) "user" key absent.
+//     (a) "user" key PRESENT and equal to user_email ("test@example.com").
+//         Plan 114 live fix: absent `user` → HTTP 500 from real API.
 //     (b) "dynamicOutputs" array in lexicographic order.
 //     (c) flat _NN_ keys present.
 //     (d) "platform" verbatim (parsed from ddrCollectionJSON; both sides go through
 //         the same unmarshal-remarshal cycle).
 //     (e) scalar fields (template, requestMethod, region, datacenter, cloudAccount,
-//         collectionId) derived from the collection, not from removed schema attrs.
+//         collectionId) derived from the collection.
+//     (f) "description" = "Terraform-managed reservation" present (Plan 114 live fix).
 //
-// RED: resource_reservation.go does not compile in its current state.
+// RED: CreateInput.User doesn't exist / Opportunity is string → compile error.
+// Also RED: user absent from POST body → assertion (a) fails.
 func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 	mock := newMockServer(t)
 	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
@@ -222,10 +242,12 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 		t.Fatalf("FAIL: POST body is not valid JSON: %v\nbody: %s", err, capturedBody)
 	}
 
-	// (a) "user" key MUST be absent.
-	if _, ok := got["user"]; ok {
-		t.Errorf("FAIL: POST body contains \"user\" key — must be absent (E8)")
-	}
+	// (a) "user" key MUST be present and equal to user_email.
+	// Plan 114 live fix: live API returns HTTP 500 "Invalid user assignment" when absent.
+	// E8 decision was wrong — server uses submitted value for myId assignment.
+	//
+	// RED: current Create() does not wire user_email → CreateInput.User → payload.
+	assertBodyString(t, got, "user", "test@example.com")
 
 	// (b) "dynamicOutputs" array in lexicographic order.
 	dynRaw, ok := got["dynamicOutputs"]
@@ -310,6 +332,10 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 	assertBodyString(t, got, "datacenter", "")
 	assertBodyString(t, got, "cloudAccount", "ITZ")
 	assertBodyString(t, got, "collectionId", "test-collection-id")
+
+	// (f) description constant always present.
+	// RED: current payload.go does not emit `description`.
+	assertBodyString(t, got, "description", "Terraform-managed reservation")
 }
 
 // ---------------------------------------------------------------------------
@@ -368,10 +394,154 @@ func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 		}
 	}
 
-	// "user" must still be absent.
-	if _, ok := got["user"]; ok {
-		t.Errorf("FAIL: \"user\" key present in POST body for empty-outputs case — must be absent (E8)")
+	// "user" MUST be present even with empty dynamic_outputs (Plan 114 live fix).
+	// RED: current Create() does not wire user_email into payload.
+	assertBodyString(t, got, "user", "test@example.com")
+
+	// "description" constant must be present regardless of dynamic_outputs.
+	assertBodyString(t, got, "description", "Terraform-managed reservation")
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: CREATE — requester_context wired into POST body (Plan 114 live fix)
+// ---------------------------------------------------------------------------
+
+// reservationConfigV2_WithRequesterContext returns a TF config that sets
+// requester_context with opportunity + iui, exercising the new schema attribute.
+func reservationConfigV2_WithRequesterContext(mockURL, apiKey string) string {
+	return providerConfigHCL(mockURL, apiKey) + `
+resource "techzone_reservation" "test" {
+  collection_id             = "test-collection-id"
+  user_email                = "test@example.com"
+  dynamic_outputs           = {
+    "_04_hcp_org" = "test-hcp-org"
+  }
+  timeout_minutes           = 1
+  reservation_duration_days = 1
+  requester_context = {
+    opportunity = ["006Ka000003kVEoIAM"]
+    iui         = "test-iui-42"
+  }
+}
+`
+}
+
+// TestReservationCreate_Wired_WithRequesterContext verifies that when
+// requester_context is set in the TF config:
+//   (a) "opportunity" in the POST body is a JSON ARRAY (not a string).
+//       Live API returns HTTP 400 when opportunity is a string.
+//   (b) "iui" in the POST body is the string value from requester_context.iui.
+//   (c) "user" is still present and equals user_email.
+//
+// RED:
+//   - `requester_context` does not exist in schema → config parsing error.
+//   - CreateInput.User / []string Opportunity don't exist → compile error.
+//   - Create() does not wire requester_context → opportunity absent from body.
+func TestReservationCreate_Wired_WithRequesterContext(t *testing.T) {
+	mock := newMockServer(t)
+	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+
+	var capturedBody []byte
+	mock.SetCreateBodyCapture(func(body []byte) { capturedBody = body })
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
+		Steps: []resource.TestStep{
+			{
+				Config: reservationConfigV2_WithRequesterContext(mock.URL(), sentinelToken),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+				),
+			},
+		},
+	})
+
+	if capturedBody == nil {
+		t.Fatal("FAIL: no POST body captured — Create did not call POST /api/reservation/aws")
 	}
+
+	var got map[string]any
+	if err := json.Unmarshal(capturedBody, &got); err != nil {
+		t.Fatalf("FAIL: POST body is not valid JSON: %v\nbody: %s", err, capturedBody)
+	}
+
+	// (a) "opportunity" must be a JSON array, NOT a string.
+	// RED: current code either omits opportunity or emits a string.
+	oppRaw, ok := got["opportunity"]
+	if !ok {
+		t.Fatal("FAIL: POST body missing \"opportunity\" key when requester_context.opportunity is set")
+	}
+	oppSlice, ok := oppRaw.([]any)
+	if !ok {
+		t.Fatalf("FAIL: \"opportunity\" is %T (%v), want []any (JSON array). "+
+			"Live API requires array; string → HTTP 400.", oppRaw, oppRaw)
+	}
+	if len(oppSlice) != 1 {
+		t.Fatalf("FAIL: opportunity array has %d elements, want 1", len(oppSlice))
+	}
+	oppVal, ok := oppSlice[0].(string)
+	if !ok {
+		t.Fatalf("FAIL: opportunity[0] is %T, want string", oppSlice[0])
+	}
+	if oppVal != "006Ka000003kVEoIAM" {
+		t.Errorf("FAIL: opportunity[0] = %q, want %q", oppVal, "006Ka000003kVEoIAM")
+	}
+
+	// (b) "iui" must be the string from requester_context.iui.
+	assertBodyString(t, got, "iui", "test-iui-42")
+
+	// (c) "user" must be present.
+	assertBodyString(t, got, "user", "test@example.com")
+
+	// description constant still present.
+	assertBodyString(t, got, "description", "Terraform-managed reservation")
+}
+
+// TestReservationCreate_Wired_NoRequesterContext verifies that when
+// requester_context is absent from the TF config, "opportunity" and "iui"
+// are both absent from the POST body (not emitted as null or empty).
+//
+// RED: same compile-fail as above.
+func TestReservationCreate_Wired_NoRequesterContext(t *testing.T) {
+	mock := newMockServer(t)
+	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+
+	var capturedBody []byte
+	mock.SetCreateBodyCapture(func(body []byte) { capturedBody = body })
+
+	// reservationConfigV2 does NOT set requester_context.
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
+		Steps: []resource.TestStep{
+			{
+				Config: reservationConfigV2(mock.URL(), sentinelToken),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+				),
+			},
+		},
+	})
+
+	if capturedBody == nil {
+		t.Fatal("FAIL: no POST body captured")
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(capturedBody, &got); err != nil {
+		t.Fatalf("FAIL: POST body is not valid JSON: %v", err)
+	}
+
+	// opportunity and iui must be absent when requester_context is not set.
+	if _, ok := got["opportunity"]; ok {
+		t.Errorf("FAIL: \"opportunity\" present in POST body when requester_context absent; must be omitted")
+	}
+	if _, ok := got["iui"]; ok {
+		t.Errorf("FAIL: \"iui\" present in POST body when requester_context absent; must be omitted")
+	}
+
+	// user must still be present.
+	assertBodyString(t, got, "user", "test@example.com")
 }
 
 // ---------------------------------------------------------------------------

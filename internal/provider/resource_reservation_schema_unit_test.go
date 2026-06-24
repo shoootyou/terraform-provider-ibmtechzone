@@ -1,7 +1,7 @@
 /**
  * @spec-handoff
  *
- * @interface reservationResource.Schema — techzone_reservation schema (post-E5 refactor)
+ * @interface reservationResource.Schema — techzone_reservation schema (post-Plan-114 live fix)
  *
  * @behavior
  *   - `template`    attribute MUST NOT exist in the schema (removed in E5).
@@ -10,6 +10,12 @@
  *   - `dynamic_outputs` attribute MUST exist as a MapAttribute of element type StringType.
  *   - `dynamic_outputs` is Optional+Computed with RequiresReplace, so that changes to
  *     the map trigger replacement (same lifecycle as the other identity attributes).
+ *   - `requester_context` attribute MUST exist as an OPTIONAL SingleNestedAttribute.
+ *     Its nested attributes:
+ *       - `opportunity` (Optional, list-of-string) — CRM opportunity IDs, sent as a
+ *         JSON array in the create payload; live API returns 400 without it when required.
+ *       - `iui` (Optional, string) — IUI field passed verbatim when non-empty.
+ *   - reservationModel gains a RequesterContext nested object field typed to match.
  *   - All other existing attributes (collection_id, user_email, region, reservation_name,
  *     purpose, reservation_duration_days, timeout_minutes, id, status, service_links,
  *     start_date, end_date) must remain present and unchanged.
@@ -19,24 +25,27 @@
  *   - dynamic_outputs round-trips: a state containing {"_04_hcp_org": "org1",
  *     "_05_hcp_project": "proj1"} must deserialize into a types.Map with those
  *     exact entries (no loss, no mutation).
+ *   - requester_context round-trips: opportunity list and iui string survive
+ *     tfsdk.State Set → Get without loss.
+ *   - requester_context absent (null) → model field is null/unknown, Create wires
+ *     empty Opportunity and empty IUI into CreateInput.
  *
  * @see ./resource_reservation.go          (Kou implements schema changes here)
- * @see ../techzone/payload.go             (BuildCreatePayload — new 3-arg signature)
+ * @see ../techzone/payload.go             (BuildCreatePayload — updated CreateInput)
  * @see .yui-soul/plans/wip/114-techzone-template-agnostic/e5-schema-resource-wiring.md
  */
 
-// Package provider — internal schema unit tests for E5 schema refactor.
+// Package provider — internal schema unit tests for E5 schema + Plan 114 live fix.
 //
-// RED GATE (E5 Task 1): these tests FAIL against the current resource_reservation.go
-// because:
-//   (a) resource_reservation.go does not compile — it calls the old 1-arg
-//       BuildCreatePayload and references CreateInput.User/HCPOrg/HCPProject
-//       which no longer exist on the struct.
-//   (b) Even if it compiled, the schema assertions below would fail because
-//       `template`, `hcp_org`, and `hcp_project` are still present in the schema
-//       and `dynamic_outputs` does not yet exist.
+// RED GATE (Plan 114 live-validation fix): tests FAIL against current resource_reservation.go:
+//   (a) `requester_context` does not exist in the schema → TestReservationSchema_RequesterContext
+//       fails immediately.
+//   (b) reservationModel has no RequesterContext field → struct literal compile error.
+//   (c) CreateInput.User does not exist / Opportunity is string not []string → compile error
+//       in payload_golden_test.go (same RED batch).
 //
-// Goes GREEN when Kou completes E5 Task 2.
+// Goes GREEN when Kou adds requester_context to Schema() and RequesterContext to
+// reservationModel, and updates CreateInput accordingly.
 package provider
 
 import (
@@ -302,4 +311,226 @@ func buildDeleteStateV2(t *testing.T, s rschema.Schema, reservationID string) tf
 		t.Fatalf("state.Set() failed: %v", diags)
 	}
 	return state
+}
+
+// ---------------------------------------------------------------------------
+// Plan 114 live-validation fix: requester_context schema + model tests
+// ---------------------------------------------------------------------------
+
+// TestReservationSchema_RequesterContextExists asserts that `requester_context`
+// exists in the schema as an Optional SingleNestedAttribute with the correct
+// nested attributes: `opportunity` (list-of-string, optional) and `iui` (string, optional).
+//
+// RED: `requester_context` does not exist in the current schema.
+// Goes GREEN when Kou adds it to Schema() in resource_reservation.go.
+func TestReservationSchema_RequesterContextExists(t *testing.T) {
+	t.Parallel()
+
+	s := resourceSchemaForDelete(t)
+
+	raw, ok := s.Attributes["requester_context"]
+	if !ok {
+		t.Fatal("FAIL: `requester_context` attribute is absent from schema; " +
+			"must be an Optional SingleNestedAttribute (Plan 114 live fix)")
+	}
+
+	nested, ok := raw.(rschema.SingleNestedAttribute)
+	if !ok {
+		t.Fatalf("FAIL: `requester_context` is %T, want rschema.SingleNestedAttribute", raw)
+	}
+
+	// Must be Optional (not Required, not Computed-only).
+	if !nested.Optional {
+		t.Errorf("FAIL: `requester_context` must be Optional (it is absent when not needed)")
+	}
+
+	// Nested: opportunity (list-of-string, optional).
+	oppRaw, ok := nested.Attributes["opportunity"]
+	if !ok {
+		t.Fatal("FAIL: `requester_context.opportunity` nested attribute is absent; " +
+			"must be an Optional ListAttribute of StringType")
+	}
+	oppList, ok := oppRaw.(rschema.ListAttribute)
+	if !ok {
+		t.Fatalf("FAIL: `requester_context.opportunity` is %T, want rschema.ListAttribute", oppRaw)
+	}
+	if oppList.ElementType != types.StringType {
+		t.Errorf("FAIL: `requester_context.opportunity` ElementType = %T, want types.StringType",
+			oppList.ElementType)
+	}
+	if !oppList.Optional {
+		t.Errorf("FAIL: `requester_context.opportunity` must be Optional")
+	}
+
+	// Nested: iui (string, optional).
+	iuiRaw, ok := nested.Attributes["iui"]
+	if !ok {
+		t.Fatal("FAIL: `requester_context.iui` nested attribute is absent; " +
+			"must be an Optional StringAttribute")
+	}
+	iuiStr, ok := iuiRaw.(rschema.StringAttribute)
+	if !ok {
+		t.Fatalf("FAIL: `requester_context.iui` is %T, want rschema.StringAttribute", iuiRaw)
+	}
+	if !iuiStr.Optional {
+		t.Errorf("FAIL: `requester_context.iui` must be Optional")
+	}
+}
+
+// TestReservationModel_RequesterContext_RoundTrip builds a reservationModel with
+// a non-nil RequesterContext (opportunity list + iui string set) and verifies
+// it round-trips through tfsdk.State Set → Get without loss.
+//
+// RED:
+//   (a) reservationModel has no RequesterContext field → struct literal compile error.
+//   (b) `requester_context` absent from schema → state.Set() returns diagnostics error.
+//
+// Goes GREEN when Kou adds RequesterContext to reservationModel and requester_context
+// to Schema().
+func TestReservationModel_RequesterContext_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := resourceSchemaForDelete(t)
+
+	dynMap, diags := types.MapValue(types.StringType, map[string]attr.Value{
+		"_04_hcp_org": types.StringValue("org-rc-test"),
+	})
+	if diags.HasError() {
+		t.Fatalf("building dynamic_outputs map: %v", diags)
+	}
+
+	emptyLinks, diags := types.ListValueFrom(
+		ctx,
+		types.ObjectType{AttrTypes: serviceLinkAttrTypes},
+		[]ServiceLinkModel{},
+	)
+	if diags.HasError() {
+		t.Fatalf("building empty service_links: %v", diags)
+	}
+
+	// Build a RequesterContext object value.
+	// The attr types must match what the schema declares for requester_context.
+	//
+	// RED: RequesterContext field does not exist on reservationModel yet.
+	// This struct literal causes a compile error until Kou adds the field.
+	rcAttrTypes := map[string]attr.Type{
+		"opportunity": types.ListType{ElemType: types.StringType},
+		"iui":         types.StringType,
+	}
+
+	oppList, diags := types.ListValueFrom(ctx, types.StringType, []string{"006Ka000003kVEoIAM"})
+	if diags.HasError() {
+		t.Fatalf("building opportunity list: %v", diags)
+	}
+
+	rcObj, diags := types.ObjectValue(rcAttrTypes, map[string]attr.Value{
+		"opportunity": oppList,
+		"iui":         types.StringValue("test-iui"),
+	})
+	if diags.HasError() {
+		t.Fatalf("building requester_context object: %v", diags)
+	}
+
+	m := reservationModel{
+		DynamicOutputs:          dynMap,
+		Region:                  types.StringValue("us-east-2"),
+		ReservationName:         types.StringValue("rc-test"),
+		Purpose:                 types.StringValue("Demo"),
+		CollectionID:            types.StringValue("69650af0758b9e41de66b6ae"),
+		UserEmail:               types.StringValue("tester@example.com"),
+		ReservationDurationDays: types.Int64Value(1),
+		TimeoutMinutes:          types.Int64Value(30),
+		ID:                      types.StringValue("rc-res-001"),
+		Status:                  types.StringValue("Ready"),
+		ServiceLinks:            emptyLinks,
+		StartDate:               types.StringValue("2026-01-01T00:00:01.000Z"),
+		EndDate:                 types.StringValue("2026-01-02T00:01:01.000Z"),
+		// RequesterContext: the new field (RED — does not exist on model yet).
+		RequesterContext: rcObj,
+	}
+
+	rawType := s.Type().TerraformType(ctx)
+	state := tfsdk.State{
+		Schema: s,
+		Raw:    tftypes.NewValue(rawType, nil),
+	}
+	if diags := state.Set(ctx, m); diags.HasError() {
+		t.Fatalf("state.Set() with RequesterContext failed: %v", diags)
+	}
+
+	var got reservationModel
+	if diags := state.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("state.Get() after RequesterContext round-trip failed: %v", diags)
+	}
+
+	// RequesterContext must survive the round-trip.
+	if got.RequesterContext.IsNull() || got.RequesterContext.IsUnknown() {
+		t.Fatal("FAIL: RequesterContext is null/unknown after round-trip; expected populated object")
+	}
+
+	// Extract nested attributes.
+	rcAttrs := got.RequesterContext.Attributes()
+
+	gotOpp, ok := rcAttrs["opportunity"]
+	if !ok {
+		t.Fatal("FAIL: opportunity absent from RequesterContext after round-trip")
+	}
+	oppListGot, ok := gotOpp.(types.List)
+	if !ok {
+		t.Fatalf("FAIL: opportunity is %T after round-trip, want types.List", gotOpp)
+	}
+	var oppElems []types.String
+	if diags := oppListGot.ElementsAs(ctx, &oppElems, false); diags.HasError() {
+		t.Fatalf("opportunity.ElementsAs failed: %v", diags)
+	}
+	if len(oppElems) != 1 || oppElems[0].ValueString() != "006Ka000003kVEoIAM" {
+		t.Errorf("FAIL: opportunity after round-trip = %v, want [\"006Ka000003kVEoIAM\"]", oppElems)
+	}
+
+	gotIUI, ok := rcAttrs["iui"]
+	if !ok {
+		t.Fatal("FAIL: iui absent from RequesterContext after round-trip")
+	}
+	iuiStr, ok := gotIUI.(types.String)
+	if !ok {
+		t.Fatalf("FAIL: iui is %T after round-trip, want types.String", gotIUI)
+	}
+	if iuiStr.ValueString() != "test-iui" {
+		t.Errorf("FAIL: iui after round-trip = %q, want %q", iuiStr.ValueString(), "test-iui")
+	}
+}
+
+// TestReservationSchema_ExistingAttributesIncludeRequesterContext verifies that
+// the Schema() still contains all expected attributes including the new
+// requester_context alongside the pre-existing ones.
+//
+// RED: requester_context absent → this test's last check for it fails.
+func TestReservationSchema_ExistingAttributesIncludeRequesterContext(t *testing.T) {
+	t.Parallel()
+
+	s := resourceSchemaForDelete(t)
+
+	// All attributes that must be present post-live-fix.
+	required := []string{
+		"collection_id",
+		"user_email",
+		"region",
+		"reservation_name",
+		"purpose",
+		"dynamic_outputs",
+		"reservation_duration_days",
+		"timeout_minutes",
+		"id",
+		"status",
+		"service_links",
+		"start_date",
+		"end_date",
+		"requester_context", // NEW — Plan 114 live fix
+	}
+	for _, name := range required {
+		if _, ok := s.Attributes[name]; !ok {
+			t.Errorf("FAIL: attribute %q must exist in schema but is absent", name)
+		}
+	}
 }

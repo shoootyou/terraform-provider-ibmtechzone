@@ -3,6 +3,15 @@
  *
  * @interface BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]string, in CreateInput) ([]byte, error)
  *
+ * @interface CreateInput struct {
+ *   Name, Purpose, Region, Datacenter, CollectionID string
+ *   Template, RequestMethod, CloudAccount           string
+ *   Start, End                                      string  // ISO-8601
+ *   User        string   // REQUIRED — reservation owner email (sent as "user" in payload)
+ *   Opportunity []string // optional — emitted as JSON array when len>0; omitted when empty
+ *   IUI         string   // optional — emitted as string when non-empty; omitted when ""
+ * }
+ *
  * @behavior
  *   - Assembles the full JSON body for POST /api/reservation/aws.
  *   - `platform` key in the output is set to platformRaw VERBATIM — bytes are
@@ -12,10 +21,17 @@
  *     field using an explicit sort.Strings (NEVER relying on map-iteration order).
  *   - For every entry in dynamicOutputs, a flat top-level key `name: value` is
  *     ALSO emitted (dual-emit: both array and flat keys, same lexicographic order).
- *   - `user` key is ABSENT from the output payload — it is NOT derived from
- *     CreateInput.User nor any other source (E8: server ignores it).
- *   - `opportunity` key is ABSENT when CreateInput.Opportunity is "" (omitted).
- *   - `iui` key is ABSENT when CreateInput.IUI is "" (omitted).
+ *   - `user` key MUST be present in the output payload and equal to in.User.
+ *     Live API rejects the request (HTTP 500 "Invalid user assignment") when `user`
+ *     is absent. The server stores `user:""` but uses the submitted value for
+ *     assignment (stored as `myId`). `user` is always emitted — it is never omitted.
+ *   - `opportunity` key is emitted as a JSON ARRAY ([]string) when
+ *     len(CreateInput.Opportunity) > 0; OMITTED entirely when the slice is empty.
+ *     Sending a string instead of an array causes the API to return HTTP 400.
+ *   - `iui` key is ABSENT when CreateInput.IUI is "" (omitted); emitted as a
+ *     JSON string when non-empty.
+ *   - `description` is ALWAYS emitted as the constant string
+ *     "Terraform-managed reservation".
  *   - Fixed constants kept from current implementation:
  *       reservationpurpose-0 = "Demo"
  *       accountPool          = "any"
@@ -40,24 +56,29 @@
  * @edge-cases
  *   - Empty dynamicOutputs map (nil or zero-length) → "dynamicOutputs": [] emitted,
  *     NO flat _NN_ keys present in output.
- *   - Opportunity = "" → `opportunity` key absent from payload.
+ *   - Opportunity = nil / [] → `opportunity` key absent from payload.
+ *   - Opportunity = ["006Ka..."] → `opportunity` key emitted as JSON array.
  *   - IUI = "" → `iui` key absent from payload.
  *   - platformRaw with specific key ordering → output preserves that ordering verbatim
  *     (no round-trip through map[string]any; json.RawMessage guarantees byte identity).
  *
- * @see ./payload.go       (current implementation — OLD signature before E3 refactor)
+ * @see ./payload.go       (implementation — must be updated by Kou to match this spec)
  * @see ../plans/wip/114-techzone-template-agnostic/e2-spec-platform-raw.md  (locked spec)
  * @see ../rfcs/approved/022-techzone-template-agnostic/README.md             (golden test spec)
  */
 
 // Package techzone_test — golden/characterization test for BuildCreatePayload.
 //
-// RED GATE (E3 Task 1): this file MUST compile-fail or assertion-fail against the
-// current payload.go (OLD signature: BuildCreatePayload(in CreateInput) ([]byte,error)).
-// The new signature takes (platformRaw json.RawMessage, dynamicOutputs map[string]string,
-// in CreateInput) — which breaks compilation immediately against the old code.
+// RED GATE (Plan 114 live-validation fix): these tests MUST fail against the current
+// payload.go because:
+//   (a) CreateInput.User does not exist yet → compile error on the struct literal.
+//   (b) CreateInput.Opportunity is `string`, not `[]string` → type mismatch compile error.
+//   (c) Even if it compiled, the `user` key is absent from the payload map (E8 decision
+//       was wrong) → assertion TestBuildCreatePayload_Golden/user_present_equals_User fails.
+//   (d) `description` constant is absent from the payload → assertion fails.
+//   (e) `opportunity` array emission logic is absent / wrong type → assertion fails.
 //
-// A test that was never RED proved nothing. Commit this file first; Kou's refactor follows.
+// A test that was never RED proved nothing. Commit first; Kou's fix follows.
 package techzone_test
 
 import (
@@ -131,8 +152,11 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 		CloudAccount:  "ITZ",
 		Start:         frozenStart,
 		End:           frozenEnd,
-		// User is intentionally absent from CreateInput (E8: dropped from schema).
+		// User MUST be set — live API returns HTTP 500 when absent (Plan 114 live fix).
+		// E8 decision was a misread: server uses the submitted value for myId assignment.
+		User: "tester@example.com",
 		// Opportunity and IUI are intentionally zero-value (→ absent from payload).
+		// Opportunity: nil / [] → omitted (tested separately below).
 	}
 
 	t.Run("canonical_DDR_full_dynamic_outputs", func(t *testing.T) {
@@ -149,10 +173,15 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 			t.Fatalf("output is not valid JSON: %v\nbytes: %s", err, gotBytes)
 		}
 
-		// --- A: user key MUST be absent (E8) ---
-		if _, ok := got["user"]; ok {
-			t.Errorf("FAIL: `user` key is present in payload — must be absent (E8; server ignores it)")
-		}
+		// --- A: user key MUST be present and equal to CreateInput.User ---
+		//
+		// Live-validation finding (Plan 114): the API returns HTTP 500 "Invalid user
+		// assignment" when `user` is absent. E8 decision was a misread — the server
+		// stores `user:""` but uses the submitted value for assignment (stored as myId).
+		// `user` must always be emitted; it equals in.User = "tester@example.com".
+		//
+		// RED: current payload.go does not include `user` in the payload map.
+		assertStringField(t, got, "user", "tester@example.com")
 
 		// --- B: start / end frozen timestamps ---
 		assertStringField(t, got, "start", frozenStart)
@@ -264,12 +293,23 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 		assertStringField(t, got, "infrastructure", "aws")
 
 		// --- I: opportunity and iui absent when not supplied ---
+		//
+		// CreateInput.Opportunity is nil / empty → `opportunity` key must be absent.
+		// CreateInput.IUI is "" → `iui` key must be absent.
 		if _, ok := got["opportunity"]; ok {
-			t.Errorf("FAIL: `opportunity` key is present but should be absent when CreateInput.Opportunity is empty")
+			t.Errorf("FAIL: `opportunity` key is present but should be absent when CreateInput.Opportunity is nil/empty")
 		}
 		if _, ok := got["iui"]; ok {
 			t.Errorf("FAIL: `iui` key is present but should be absent when CreateInput.IUI is empty")
 		}
+
+		// --- J: description constant MUST always be present ---
+		//
+		// Live-validation finding (Plan 114): create.sh sends `description`; the API
+		// expects it. Provider must always emit "Terraform-managed reservation".
+		//
+		// RED: current payload.go does not emit `description`.
+		assertStringField(t, got, "description", "Terraform-managed reservation")
 	})
 
 	t.Run("empty_dynamic_outputs", func(t *testing.T) {
@@ -288,6 +328,8 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 			CloudAccount:  "ITZ",
 			Start:         frozenStart,
 			End:           frozenEnd,
+			// User MUST be set — absent → HTTP 500 from live API.
+			User: "tester@example.com",
 		}
 
 		gotBytes, err := techzone.BuildCreatePayload(canonicalPlatformRaw, nil, emptyInput)
@@ -320,9 +362,112 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 			}
 		}
 
-		// user still absent.
-		if _, ok := got["user"]; ok {
-			t.Errorf("FAIL: `user` key is present for empty-outputs case — must always be absent (E8)")
+		// user MUST be present even with empty dynamic_outputs (live fix).
+		assertStringField(t, got, "user", "tester@example.com")
+
+		// description MUST be present even with empty dynamic_outputs.
+		assertStringField(t, got, "description", "Terraform-managed reservation")
+	})
+
+	t.Run("opportunity_emitted_as_array_when_set", func(t *testing.T) {
+		// Live-validation finding (Plan 114): `opportunity` MUST be a JSON array.
+		// Sending a string causes HTTP 400 "Request out of policy scope".
+		// When CreateInput.Opportunity has elements, the payload must contain
+		// "opportunity": ["006Ka..."] — NOT "opportunity": "006Ka...".
+		t.Parallel()
+
+		inputWithOpportunity := techzone.CreateInput{
+			Name:          "golden-opportunity",
+			Purpose:       "Demo",
+			Region:        "us-east-2",
+			Datacenter:    "",
+			CollectionID:  "69650af0758b9e41de66b6ae",
+			Template:      "aws-account-hashicorp-ddr",
+			RequestMethod: "aws-account-hashicorp-ddr",
+			CloudAccount:  "ITZ",
+			Start:         frozenStart,
+			End:           frozenEnd,
+			User:          "tester@example.com",
+			// Opportunity: a single CRM opportunity ID (real format from create.sh).
+			// RED: CreateInput.Opportunity is currently `string`, not `[]string` →
+			// this struct literal causes a compile error until Kou changes the type.
+			Opportunity: []string{"006Ka000003kVEoIAM"},
+			IUI:         "test-iui-value",
+		}
+
+		gotBytes, err := techzone.BuildCreatePayload(canonicalPlatformRaw, nil, inputWithOpportunity)
+		if err != nil {
+			t.Fatalf("BuildCreatePayload returned unexpected error: %v", err)
+		}
+
+		var got map[string]any
+		if err := json.Unmarshal(gotBytes, &got); err != nil {
+			t.Fatalf("output is not valid JSON: %v\nbytes: %s", err, gotBytes)
+		}
+
+		// opportunity MUST be a JSON array (not a string).
+		// RED: current code either omits it (Opportunity=="") or emits a string.
+		oppRaw, ok := got["opportunity"]
+		if !ok {
+			t.Fatal("FAIL: `opportunity` key is absent when CreateInput.Opportunity is non-empty")
+		}
+		oppSlice, ok := oppRaw.([]any)
+		if !ok {
+			t.Fatalf("FAIL: `opportunity` is %T (%v), want JSON array ([]any). "+
+				"Live API requires an array; a string causes HTTP 400.", oppRaw, oppRaw)
+		}
+		if len(oppSlice) != 1 {
+			t.Fatalf("FAIL: opportunity array has %d elements, want 1", len(oppSlice))
+		}
+		oppVal, ok := oppSlice[0].(string)
+		if !ok {
+			t.Fatalf("FAIL: opportunity[0] is %T, want string", oppSlice[0])
+		}
+		if oppVal != "006Ka000003kVEoIAM" {
+			t.Errorf("FAIL: opportunity[0] = %q, want %q", oppVal, "006Ka000003kVEoIAM")
+		}
+
+		// iui MUST be present when CreateInput.IUI is non-empty.
+		assertStringField(t, got, "iui", "test-iui-value")
+
+		// user must still be present.
+		assertStringField(t, got, "user", "tester@example.com")
+
+		// description must still be present.
+		assertStringField(t, got, "description", "Terraform-managed reservation")
+	})
+
+	t.Run("opportunity_omitted_when_empty_slice", func(t *testing.T) {
+		// When CreateInput.Opportunity is nil or empty, `opportunity` must be absent.
+		t.Parallel()
+
+		inputNoOpportunity := techzone.CreateInput{
+			Name:          "golden-no-opp",
+			Purpose:       "Demo",
+			Region:        "us-east-2",
+			Datacenter:    "",
+			CollectionID:  "69650af0758b9e41de66b6ae",
+			Template:      "aws-account-hashicorp-ddr",
+			RequestMethod: "aws-account-hashicorp-ddr",
+			CloudAccount:  "ITZ",
+			Start:         frozenStart,
+			End:           frozenEnd,
+			User:          "tester@example.com",
+			Opportunity:   nil, // empty → omit
+		}
+
+		gotBytes, err := techzone.BuildCreatePayload(canonicalPlatformRaw, nil, inputNoOpportunity)
+		if err != nil {
+			t.Fatalf("BuildCreatePayload returned unexpected error: %v", err)
+		}
+
+		var got map[string]any
+		if err := json.Unmarshal(gotBytes, &got); err != nil {
+			t.Fatalf("output is not valid JSON: %v\nbytes: %s", err, gotBytes)
+		}
+
+		if _, ok := got["opportunity"]; ok {
+			t.Errorf("FAIL: `opportunity` key is present when CreateInput.Opportunity is nil; must be omitted")
 		}
 	})
 }
