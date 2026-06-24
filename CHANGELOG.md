@@ -5,6 +5,13 @@ Entries from v1.0.0 onward are generated automatically by [release-please](https
 
 <!-- release-please inserts new entries above this line -->
 
+## [1.0.1](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.0.0...v1.0.1) (2026-06-24)
+
+
+### Bug Fixes
+
+* documentation ([#10](https://github.com/shoootyou/terraform-provider-techzone/issues/10)) ([2db27a1](https://github.com/shoootyou/terraform-provider-techzone/commit/2db27a197a0234705fa33fbd874768e34431979f))
+
 ## [1.0.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v0.4.0...v1.0.0) (2026-06-24)
 
 
