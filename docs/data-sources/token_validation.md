@@ -18,7 +18,7 @@ resource "techzone_reservation" "example" {
   depends_on = [data.techzone_token_validation.check]
 
   collection_id = "abc123def456789"
-  user_email    = "rodolfo.castelo@hashicorp.com"
+  user_email    = "user@example.com"
   hcp_org       = "org-AbCdEfGh"
   hcp_project   = "project-XxYyZz12"
 }
