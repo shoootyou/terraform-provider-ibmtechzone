@@ -88,25 +88,8 @@ func TestAccReservation_InPlaceUpdateOperational(t *testing.T) {
 	})
 }
 
-// reservationConfigWithTimeout returns a config identical to reservationConfig
-// but with an explicit timeout_minutes value so we can change it between steps.
-func reservationConfigWithTimeout(mockURL, apiKey string, timeoutMinutes int) string {
-	return fmt.Sprintf(`
-provider "techzone" {
-  api_key  = %q
-  api_base = %q
-}
-
-resource "techzone_reservation" "test" {
-  collection_id             = "test-collection-id"
-  user_email                = "test@example.com"
-  hcp_org                   = "test-hcp-org"
-  hcp_project               = "test-hcp-project"
-  timeout_minutes           = %d
-  reservation_duration_days = 1
-}
-`, apiKey, mockURL, timeoutMinutes)
-}
+// reservationConfigWithTimeout is defined in testutil_mock_server_test.go
+// (E5: moved there alongside reservationConfig; uses dynamic_outputs map).
 
 // ---------------------------------------------------------------------------
 // Advisory probe: an expired Configure probe does NOT block a working DELETE

@@ -1,8 +1,9 @@
 # techzone_reservation (Resource)
 
-Manages an IBM TechZone AWS account reservation. The provider submits a reservation
-request to TechZone, polls until the reservation reaches `Ready` status (configurable
-via `timeout_minutes`), and stores the resulting service links and dates in state.
+Manages an IBM TechZone AWS account reservation. The provider fetches the
+collection to derive the platform/region/template fields, submits a reservation
+request, polls until the reservation reaches `Ready` status (configurable via
+`timeout_minutes`), and stores the resulting service links and dates in state.
 
 During `terraform refresh` and `terraform plan`, the resource prunes itself from
 state automatically when the reservation has expired or been deleted upstream — the
@@ -19,11 +20,16 @@ resource "techzone_reservation" "example" {
 
   collection_id = "abc123def456789"
   user_email    = "user@example.com"
-  hcp_org       = "org-AbCdEfGh"
-  hcp_project   = "project-XxYyZz12"
+
+  # dynamic_outputs: opaque _NN_ keys injected into the reservation payload.
+  # Keys are emitted in lexicographic order in both the dynamicOutputs[] array
+  # and as flat top-level keys (dual-emit). An empty map {} is valid.
+  dynamic_outputs = {
+    "_04_hcp_org"     = "org-AbCdEfGh"
+    "_05_hcp_project" = "project-XxYyZz12"
+  }
 
   # Optional — shown with non-default values
-  template                  = "my-awesome-template"
   region                    = "us-west-2"
   reservation_name          = "My Awesome Reservation"
   purpose                   = "Learning"
@@ -44,29 +50,33 @@ output "aws_console_url" {
 The following arguments are supported:
 
 * `collection_id` - (Required) TechZone collection ID for this reservation.
+  The provider fetches `GET /api/collection/<id>` to derive the platform,
+  template, region, and cloud-account fields for the reservation payload.
   Changing this value forces a new resource.
 
 * `user_email` - (Required) IBM ID (email address) of the reservation owner.
   Also used as the `IBMID` field in the delete payload.
   Changing this value forces a new resource.
 
-* `hcp_org` - (Required) HCP organization ID, injected as a dynamic output into
-  the reservation. Changing this value forces a new resource.
+* `dynamic_outputs` - (Required, Map of String) Opaque `_NN_name` output keys
+  mapped to string values. These are injected into the TechZone reservation
+  payload in two forms:
+  1. A `dynamicOutputs` array (elements in **lexicographic key order**).
+  2. Flat top-level keys using the same names (dual-emit).
 
-* `hcp_project` - (Required) HCP project ID, injected as a dynamic output into
-  the reservation. Changing this value forces a new resource.
-
-* `template` - (Optional) TechZone template name. Defaults to
-  `template-example`. Changing this value forces a new resource.
+  An empty map (`{}`) is valid: it produces `"dynamicOutputs": []` and no flat
+  keys. Keys must follow the `_NN_name` convention used by TechZone dynamic
+  outputs (e.g. `_04_hcp_org`, `_05_hcp_project`).
+  Changing this value forces a new resource.
 
 * `region` - (Optional) AWS region for the reservation. Defaults to `us-east-2`.
   Changing this value forces a new resource.
 
-* `reservation_name` - (Optional) Display name for the reservation. Defaults to
-  `Reservation Name`. Changing this value forces a new resource.
+* `reservation_name` - (Optional) Display name for the reservation.
+  Changing this value forces a new resource.
 
-* `purpose` - (Optional) Reservation purpose. Defaults to `Demo`. Changing this
-  value forces a new resource.
+* `purpose` - (Optional) Reservation purpose.
+  Changing this value forces a new resource.
 
 * `reservation_duration_days` - (Optional, Number) Duration in days at create time.
   Defaults to `1`. Changing this value does **not** modify the existing reservation;

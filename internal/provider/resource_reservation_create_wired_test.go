@@ -209,7 +209,7 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 				),
 			},
 		},
-		CheckDestroy: func(_ interface{ Helper() }) error { return nil },
+			CheckDestroy: nil,
 	})
 
 	// Now assert on the captured POST body.

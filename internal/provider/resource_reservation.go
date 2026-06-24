@@ -8,6 +8,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -42,14 +44,12 @@ type reservationResource struct {
 // reservationModel is the Terraform state model for techzone_reservation.
 type reservationModel struct {
 	// Identity inputs (RequiresReplace)
-	Template        types.String `tfsdk:"template"`
+	DynamicOutputs  types.Map    `tfsdk:"dynamic_outputs"`
 	Region          types.String `tfsdk:"region"`
 	ReservationName types.String `tfsdk:"reservation_name"`
 	Purpose         types.String `tfsdk:"purpose"`
 	CollectionID    types.String `tfsdk:"collection_id"`
 	UserEmail       types.String `tfsdk:"user_email"`
-	HCPOrg          types.String `tfsdk:"hcp_org"`
-	HCPProject      types.String `tfsdk:"hcp_project"`
 
 	// Operational inputs (no RequiresReplace)
 	ReservationDurationDays types.Int64 `tfsdk:"reservation_duration_days"`
@@ -136,17 +136,26 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 		MarkdownDescription: "Manages an IBM TechZone AWS account reservation. " +
 			"Models the lifecycle of a temporary AWS account provisioned from the " +
 			"TechZone pool.\n\n" +
-			"> **Note:** Identity attributes (`template`, `region`, `reservation_name`, " +
-			"`purpose`, `collection_id`, `user_email`, `hcp_org`, `hcp_project`) trigger " +
-			"replacement when changed. `timeout_minutes` and `reservation_duration_days` " +
-			"are operational and do not trigger replacement.",
+			"> **Note:** Identity attributes (`dynamic_outputs`, `region`, `reservation_name`, " +
+			"`purpose`, `collection_id`, `user_email`) trigger replacement when changed. " +
+			"`timeout_minutes` and `reservation_duration_days` are operational and do not " +
+			"trigger replacement.",
 		Attributes: map[string]schema.Attribute{
 			// --- Identity inputs (RequiresReplace) ---
-			"template": schema.StringAttribute{
-				MarkdownDescription: "TechZone template name.",
-				Optional:            true,
-				Computed:            true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			"dynamic_outputs": schema.MapAttribute{
+				MarkdownDescription: "Map of opaque `_NN_` output keys to string values, " +
+					"injected into the reservation payload as both a `dynamicOutputs` array " +
+					"(in lexicographic key order) and as flat top-level keys (dual-emit).\n\n" +
+					"Keys follow the `_NN_name` convention (e.g. `_04_hcp_org`, " +
+					"`_05_hcp_project`). An empty map (`{}`) is valid and results in " +
+					"`\"dynamicOutputs\": []` with no flat keys.\n\n" +
+					"Example:\n```hcl\ndynamic_outputs = {\n  \"_04_hcp_org\"     = " +
+					"\"my-hcp-org\"\n  \"_05_hcp_project\" = \"my-hcp-project\"\n}\n```",
+				ElementType: types.StringType,
+				Required:    true,
+				PlanModifiers: []planmodifier.Map{
+					mapplanmodifier.RequiresReplace(),
+				},
 			},
 			"region": schema.StringAttribute{
 				MarkdownDescription: "AWS region for the reservation. Defaults to `us-east-2`.",
@@ -177,16 +186,6 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 					"Also used as the `IBMID` in the delete payload.",
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
-			},
-			"hcp_org": schema.StringAttribute{
-				MarkdownDescription: "HCP organization ID injected as `_04_hcp_org` dynamic output. Required.",
-				Required:            true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
-			},
-			"hcp_project": schema.StringAttribute{
-				MarkdownDescription: "HCP project ID injected as `_05_hcp_project` dynamic output. Required.",
-				Required:            true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 
 			// --- Operational inputs (no RequiresReplace) ---
@@ -300,6 +299,47 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
+	// Read dynamic_outputs from the plan into a plain Go map.
+	var dynamicOutputs map[string]string
+	resp.Diagnostics.Append(plan.DynamicOutputs.ElementsAs(ctx, &dynamicOutputs, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Fetch the collection to derive platform/region/template/etc. fields.
+	// Token-safety: never include the bearer token in error messages.
+	c := r.pd.Client
+	coll, err := c.GetCollection(ctx, plan.CollectionID.ValueString())
+	if err != nil {
+		switch {
+		case errors.Is(err, techzone.ErrCollectionNotFound):
+			resp.Diagnostics.AddError("Collection not found",
+				fmt.Sprintf("Collection %q was not found in TechZone. Verify the collection_id is correct.",
+					plan.CollectionID.ValueString()))
+		case errors.Is(err, techzone.ErrCollectionUnavailable):
+			resp.Diagnostics.AddError("Collection unavailable",
+				"The TechZone collection is temporarily unavailable. Try again later.")
+		case errors.Is(err, techzone.ErrMalformedCollectionResponse),
+			errors.Is(err, techzone.ErrEmptyPlatforms),
+			errors.Is(err, techzone.ErrNoRegions):
+			resp.Diagnostics.AddError("Collection data incomplete (contact TechZone)",
+				"The collection response is missing required platform or region data. "+
+					"Contact TechZone support.")
+		case errors.Is(err, techzone.ErrUnsupportedInfrastructure):
+			resp.Diagnostics.AddError("Infrastructure type not supported",
+				"The collection uses an infrastructure type that is not supported by this provider. "+
+					"Only AWS collections are supported.")
+		default:
+			resp.Diagnostics.AddError("Failed to fetch collection",
+				fmt.Sprintf("GET collection %q: %s", plan.CollectionID.ValueString(), err.Error()))
+		}
+		return
+	}
+
+	// Derive scalar fields from the primary platform's first region.
+	primaryPlatform := coll.Platforms[0]
+	primaryRegion := primaryPlatform.Regions[0]
+
 	// Compute start/end timestamps: start = now+1min, end = now+1min+duration_days.
 	now := r.now().UTC()
 	start := now.Add(1 * time.Minute).Format("2006-01-02T15:04:05.000Z")
@@ -307,18 +347,19 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 	end := now.Add(1*time.Minute + time.Duration(durationDays)*24*time.Hour).Format("2006-01-02T15:04:05.000Z")
 
 	input := techzone.CreateInput{
-		Name:         plan.ReservationName.ValueString(),
-		Purpose:      plan.Purpose.ValueString(),
-		User:         plan.UserEmail.ValueString(),
-		Region:       plan.Region.ValueString(),
-		CollectionID: plan.CollectionID.ValueString(),
-		HCPOrg:       plan.HCPOrg.ValueString(),
-		HCPProject:   plan.HCPProject.ValueString(),
-		Start:        start,
-		End:          end,
+		Name:          plan.ReservationName.ValueString(),
+		Purpose:       plan.Purpose.ValueString(),
+		Region:        primaryRegion.Region,
+		Datacenter:    primaryRegion.Datacenter,
+		CollectionID:  plan.CollectionID.ValueString(),
+		Template:      primaryRegion.Template,
+		RequestMethod: primaryRegion.RequestMethod,
+		CloudAccount:  primaryRegion.CloudAccount,
+		Start:         start,
+		End:           end,
 	}
 
-	payload, err := techzone.BuildCreatePayload(input)
+	payload, err := techzone.BuildCreatePayload(primaryPlatform.Raw, dynamicOutputs, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to build create payload", err.Error())
 		return
@@ -369,7 +410,9 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 			}
 		}
 
-		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+		// Poll path: /api/reservation/<id> (status-only; no "aws/" prefix).
+		// The canonical read at /api/reservation/aws/<id> is used only after Ready.
+		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/"+reservationID)
 		if pollErr != nil {
 			tflog.Warn(ctx, "Poll connectivity error, retrying", map[string]any{
 				"reservation_id": reservationID,
@@ -712,6 +755,20 @@ func (r *reservationResource) ImportState(ctx context.Context, req resource.Impo
 // The fallback chain is identical to the jq filters in create.sh and read.sh.
 func mapResponseToModel(base reservationModel, r *tzReservationResponse) reservationModel {
 	out := base
+
+	// Normalize Optional+Computed fields: if the plan value is Unknown (not set by
+	// the user and not yet resolved), replace with a known empty string so that the
+	// Framework can accept the state after apply.  The API does not return these
+	// fields, so "" is the correct resolved value when omitted from config.
+	if out.ReservationName.IsUnknown() {
+		out.ReservationName = types.StringValue("")
+	}
+	if out.Purpose.IsUnknown() {
+		out.Purpose = types.StringValue("")
+	}
+	if out.Region.IsUnknown() {
+		out.Region = types.StringValue("")
+	}
 
 	out.ID = types.StringValue(r.ID)
 	out.Status = types.StringValue(derefString(r.Status))

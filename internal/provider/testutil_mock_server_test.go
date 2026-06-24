@@ -109,8 +109,46 @@ type mockCollectionResponse struct {
 	body       string
 }
 
+// ddrCollectionJSONDefault is the default DDR collection response used by
+// newMockServer to pre-seed "test-collection-id" so that all existing
+// acceptance tests (which use reservationConfig / reservationConfigWithTimeout)
+// get a valid AWS collection without requiring per-test SetCollectionResponse calls.
+//
+// The canonical definition of this fixture lives in resource_reservation_create_wired_test.go
+// (ddrCollectionJSON); this copy keeps the mock server self-contained.
+const ddrCollectionJSONDefault = `{
+  "id": "test-collection-id",
+  "platforms": [
+    {
+      "oid": "62ccb18c2d38520017eec9fb",
+      "id": "69651c138d6e497dc77a8dbe",
+      "name": "Reservation Name",
+      "infrastructure": "aws",
+      "regions": [
+        {
+          "name": "US East 2",
+          "region": "us-east-2",
+          "datacenter": "",
+          "template": "aws-account-hashicorp-ddr",
+          "requestMethod": "aws-account-hashicorp-ddr",
+          "cloudAccount": "ITZ",
+          "pattern": {
+            "id": "ccp-gitops/aws-account-hashicorp-ddr/itz",
+            "name": "aws-account-hashicorp-ddr",
+            "profile": "itz"
+          }
+        }
+      ]
+    }
+  ]
+}`
+
 // newMockServer creates and starts a new mockTechZoneServer.
 // The server is automatically closed when the test ends.
+//
+// The mock is pre-seeded with a DDR AWS collection response for "test-collection-id"
+// so that all tests using reservationConfig / reservationConfigWithTimeout get a
+// valid collection without requiring explicit SetCollectionResponse calls.
 func newMockServer(t *testing.T) *mockTechZoneServer {
 	t.Helper()
 	m := &mockTechZoneServer{
@@ -118,7 +156,12 @@ func newMockServer(t *testing.T) *mockTechZoneServer {
 		canonicalReadMode:    "ready",
 		tokenValidateMode:    "valid",
 		deleteStatusSequence: []int{200},
-		collectionResponses:  make(map[string]mockCollectionResponse),
+		collectionResponses: map[string]mockCollectionResponse{
+			"test-collection-id": {
+				statusCode: 200,
+				body:       ddrCollectionJSONDefault,
+			},
+		},
 	}
 	m.server = httptest.NewServer(http.HandlerFunc(m.ServeHTTP))
 	t.Cleanup(m.server.Close)
@@ -430,6 +473,8 @@ func (m *mockTechZoneServer) handleDelete(w http.ResponseWriter, r *http.Request
 
 // reservationConfig returns a complete Terraform config for a
 // techzone_reservation resource, using the given mock server URL and api_key.
+//
+// E5 update: hcp_org / hcp_project removed from schema; replaced by dynamic_outputs map.
 func reservationConfig(mockURL, apiKey string) string {
 	return fmt.Sprintf(`
 provider "techzone" {
@@ -440,10 +485,36 @@ provider "techzone" {
 resource "techzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
-  hcp_org                   = "test-hcp-org"
-  hcp_project               = "test-hcp-project"
+  dynamic_outputs           = {
+    "_04_hcp_org"     = "test-hcp-org"
+    "_05_hcp_project" = "test-hcp-project"
+  }
   timeout_minutes           = 1
   reservation_duration_days = 1
 }
 `, apiKey, mockURL)
+}
+
+// reservationConfigWithTimeout returns a config identical to reservationConfig
+// but with an explicit timeout_minutes value so tests can change it between steps.
+//
+// E5 update: hcp_org / hcp_project removed; replaced by dynamic_outputs map.
+func reservationConfigWithTimeout(mockURL, apiKey string, timeoutMinutes int) string {
+	return fmt.Sprintf(`
+provider "techzone" {
+  api_key  = %q
+  api_base = %q
+}
+
+resource "techzone_reservation" "test" {
+  collection_id             = "test-collection-id"
+  user_email                = "test@example.com"
+  dynamic_outputs           = {
+    "_04_hcp_org"     = "test-hcp-org"
+    "_05_hcp_project" = "test-hcp-project"
+  }
+  timeout_minutes           = %d
+  reservation_duration_days = 1
+}
+`, apiKey, mockURL, timeoutMinutes)
 }
