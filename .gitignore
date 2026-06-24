@@ -1,0 +1,51 @@
+# ── Workspace hygiene (Chi / AGENTS.md convention) ──────────────────────────
+# These files must never be committed to the provider repo.
+temporal.tf
+temporal.auto.tfvars
+*.tfplan
+
+# ── Go build artifacts ───────────────────────────────────────────────────────
+# Built provider binary (local `make build` output)
+terraform-provider-techzone
+terraform-provider-techzone.exe
+
+# GoReleaser output directory
+/dist/
+
+# ── Terraform / provider ─────────────────────────────────────────────────────
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformignore
+
+# ── Go tooling ───────────────────────────────────────────────────────────────
+# Test cache / coverage
+*.test
+*.out
+coverage.html
+
+# Go workspace files (not used in this repo)
+go.work
+go.work.sum
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# ── Secrets / credentials (Ei-B F5) ─────────────────────────────────────────
+# These files must never be committed — they may contain sensitive values.
+.env
+*.key
+*.pem
+terraform.tfvars
