@@ -3,8 +3,8 @@
 Manages IBM TechZone AWS account reservations. The provider provisions temporary
 AWS cloud accounts from the TechZone pool via the TechZone API.
 
--> **Note** This provider uses a browser-session token from IBM TechZone. See the
-[Authentication guide](guides/authentication.md) for how to obtain and rotate it.
+-> **Note** This provider uses a user token from IBM TechZone. See the
+[Authentication guide](guides/authentication.md) for how to obtain it.
 
 ## Example Usage
 
