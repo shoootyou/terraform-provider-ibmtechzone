@@ -5,6 +5,26 @@ Entries from v1.0.0 onward are generated automatically by [release-please](https
 
 <!-- release-please inserts new entries above this line -->
 
+## [1.0.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v0.4.0...v1.0.0) (2026-06-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* provider now follows semantic versioning with automated releases via release-please. Manual tagging is no longer required.
+
+### Features
+
+* Adding personal GPG key support ([#3](https://github.com/shoootyou/terraform-provider-techzone/issues/3)) ([10657da](https://github.com/shoootyou/terraform-provider-techzone/commit/10657dae7c705a4a19c8bae74776669f0f35aef2))
+* All packages updated ([#1](https://github.com/shoootyou/terraform-provider-techzone/issues/1)) ([03dcd56](https://github.com/shoootyou/terraform-provider-techzone/commit/03dcd5627b153a772bb35c903391973ca9870b51))
+* automated release pipeline + stable v1.0.0 ([834624b](https://github.com/shoootyou/terraform-provider-techzone/commit/834624b87ae48c3009e050494540b20f04c06a02))
+
+
+### Bug Fixes
+
+* add registry-compliant provider documentation ([e41a6fe](https://github.com/shoootyou/terraform-provider-techzone/commit/e41a6feef4c3a813146b7cfcf4d72cba634b0be7))
+* goreleaser signing, archives format, remove hardcoded repo owner ([#5](https://github.com/shoootyou/terraform-provider-techzone/issues/5)) ([e23a15a](https://github.com/shoootyou/terraform-provider-techzone/commit/e23a15a7ac849cfb6ea74eb608109efa0ba861ca))
+* GPG signing ([#8](https://github.com/shoootyou/terraform-provider-techzone/issues/8)) ([77a4c48](https://github.com/shoootyou/terraform-provider-techzone/commit/77a4c485ee7ec2b3fe72964b7d6855989196db6d))
+
 ## [2.0.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.2.1...v2.0.0) (2026-06-24)
 
 
