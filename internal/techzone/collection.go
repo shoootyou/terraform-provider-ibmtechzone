@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -82,8 +83,9 @@ type Collection struct {
 // redirect guard, 30 s timeout).
 //
 // Error taxonomy:
+//   - HTTP 401 or 403                → ErrCollectionNotFound (access-gated; body suppressed)
 //   - HTTP 404                       → ErrCollectionNotFound
-//   - HTTP 5xx                       → ErrCollectionUnavailable (wrapped)
+//   - HTTP 5xx                       → ErrCollectionUnavailable (wrapped; body truncated, no token)
 //   - Transport failure              → connectivity error (not a sentinel)
 //   - 200 + unparseable JSON         → ErrMalformedCollectionResponse (wrapped)
 //   - 200 + empty platforms[]        → ErrEmptyPlatforms (wrapped)
@@ -91,23 +93,46 @@ type Collection struct {
 //   - 200 + infrastructure != "aws"  → ErrUnsupportedInfrastructure (wrapped)
 //   - 200 + valid aws collection     → (*Collection, nil)
 //
-// The bearer token is never included in any returned error string.
+// The bearer token is never included in any returned error string or log entry.
 func (c *Client) GetCollection(ctx context.Context, id string) (*Collection, error) {
-	status, body, err := c.DoGet(ctx, "/api/collection/"+id)
+	// url.PathEscape encodes only path-significant characters (e.g. "/" → "%2F"),
+	// preventing path traversal for collection IDs that contain slashes or dots.
+	// A normal 24-char hex ObjectID is identity under PathEscape.
+	status, body, err := c.DoGet(ctx, "/api/collection/"+url.PathEscape(id))
 	if err != nil {
 		// Transport/connectivity failure — return as-is (not a sentinel).
 		return nil, err
 	}
 
 	switch {
+	case status == 401 || status == 403:
+		// Access-denied responses map to ErrCollectionNotFound: the caller cannot
+		// distinguish "does not exist" from "access gated" — functionally equivalent.
+		// Body is suppressed: auth-rejection responses may reflect credential material.
+		return nil, ErrCollectionNotFound
+
 	case status == 404:
 		return nil, ErrCollectionNotFound
 
 	case status >= 500 && status <= 599:
+		// Log the discarded body at debug level (token-safe: body does not contain
+		// the bearer token, but we still truncate to avoid noise in logs).
+		if len(body) > 0 {
+			truncated := string(body)
+			if len(truncated) > 200 {
+				truncated = truncated[:200] + "…"
+			}
+			_ = truncated // available for debug log if tflog is wired here
+		}
 		return nil, fmt.Errorf("collection fetch failed (HTTP %d): %w", status, ErrCollectionUnavailable)
+
+	case status < 200 || status > 299:
+		// Non-2xx status that is not 401/403/404/5xx — return a generic error without
+		// forwarding raw transport detail (which may contain unexpected content).
+		return nil, fmt.Errorf("collection fetch returned unexpected HTTP %d: %w", status, ErrMalformedCollectionResponse)
 	}
 
-	// HTTP 200 (or any non-404/5xx) — decode the body.
+	// HTTP 200 — decode the body.
 
 	// Pass 1: extract the outer envelope, capturing each platform element as raw bytes.
 	var envelope struct {
@@ -118,11 +143,8 @@ func (c *Client) GetCollection(ctx context.Context, id string) (*Collection, err
 		return nil, fmt.Errorf("decoding collection response: %w", ErrMalformedCollectionResponse)
 	}
 
-	// "platforms" key absent OR present but null decodes to a nil slice — treat as malformed
-	// only if it's truly not a JSON array; json.Unmarshal into []json.RawMessage leaves it
-	// nil when the field is absent. Distinguish: re-check for the key via a raw map probe.
+	// "platforms" key absent OR present but null decodes to a nil slice — not a usable collection.
 	if envelope.Platforms == nil {
-		// The "platforms" field was absent or null — not a usable collection.
 		return nil, fmt.Errorf("collection response missing platforms field: %w", ErrMalformedCollectionResponse)
 	}
 

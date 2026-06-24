@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -22,6 +24,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
@@ -177,9 +180,19 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"collection_id": schema.StringAttribute{
-				MarkdownDescription: "TechZone collection ID for this reservation. Required.",
-				Required:            true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				MarkdownDescription: "TechZone collection ID for this reservation. Required. " +
+					"Must be a 24-character hexadecimal string (MongoDB ObjectID format).",
+				Required:      true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+				Validators: []validator.String{
+					// Reject IDs that are not valid MongoDB ObjectIDs at plan time,
+					// before any Apply. This also eliminates path-injection risk (Ei F-01):
+					// a valid hex-24 ID cannot contain path-significant characters.
+					stringvalidator.RegexMatches(
+						regexp.MustCompile(`^[a-fA-F0-9]{24}$`),
+						"must be a 24-character hexadecimal string (MongoDB ObjectID format)",
+					),
+				},
 			},
 			"user_email": schema.StringAttribute{
 				MarkdownDescription: "IBM ID (email) of the reservation owner. Required. " +
@@ -422,12 +435,17 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 			continue
 		}
 		if pollStatus < 200 || pollStatus >= 300 {
-			tflog.Warn(ctx, "Poll returned non-2xx status, retrying", map[string]any{
+			// Suppress body_preview at 401/403: auth-rejection bodies may reflect
+			// credential material. Log only the status code for these cases.
+			logFields := map[string]any{
 				"reservation_id": reservationID,
 				"attempt":        attempt,
 				"http_status":    pollStatus,
-				"body_preview":   truncate(pollBody, 200),
-			})
+			}
+			if pollStatus != 401 && pollStatus != 403 {
+				logFields["body_preview"] = truncate(pollBody, 200)
+			}
+			tflog.Warn(ctx, "Poll returned non-2xx status, retrying", logFields)
 			continue
 		}
 
@@ -760,14 +778,14 @@ func mapResponseToModel(base reservationModel, r *tzReservationResponse) reserva
 	// the user and not yet resolved), replace with a known empty string so that the
 	// Framework can accept the state after apply.  The API does not return these
 	// fields, so "" is the correct resolved value when omitted from config.
+	//
+	// Note: `region` is not normalized here because it has a static default
+	// ("us-east-2") — it is always a known value by the time Create is called.
 	if out.ReservationName.IsUnknown() {
 		out.ReservationName = types.StringValue("")
 	}
 	if out.Purpose.IsUnknown() {
 		out.Purpose = types.StringValue("")
-	}
-	if out.Region.IsUnknown() {
-		out.Region = types.StringValue("")
 	}
 
 	out.ID = types.StringValue(r.ID)

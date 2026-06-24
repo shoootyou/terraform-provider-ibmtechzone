@@ -16,8 +16,48 @@ package techzone
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 )
+
+// reservedPayloadKeys is the set of top-level field names that BuildCreatePayload
+// emits as structural fields. Any dynamic_outputs key that collides with a member
+// of this set would silently overwrite a structural field — a category of injection
+// risk documented in Ei audit finding F-02.
+//
+// The set covers every key emitted by BuildCreatePayload in its current form.
+// Adding new structural fields to the payload map MUST be accompanied by a
+// corresponding addition here.
+var reservedPayloadKeys = map[string]struct{}{
+	"platform":             {},
+	"user":                 {},
+	"type":                 {},
+	"terms":                {},
+	"collectionId":         {},
+	"name":                 {},
+	"purpose":              {},
+	"region":               {},
+	"datacenter":           {},
+	"cloudAccount":         {},
+	"dynamicOutputs":       {},
+	"start":                {},
+	"end":                  {},
+	"template":             {},
+	"requestMethod":        {},
+	"infrastructure":       {},
+	"iui":                  {},
+	"opportunity":          {},
+	"customer":             {},
+	"customerData":         {},
+	"customerDataTypes":    {},
+	"reservationtype-0":    {},
+	"reservationpurpose-0": {},
+	"accountPool":          {},
+	"geo":                  {},
+	"notes":                {},
+	"description":          {},
+	"opportunityProduct":   {},
+}
 
 // ---------------------------------------------------------------------------
 // CreateInput — variable fields for each reservation
@@ -50,6 +90,18 @@ type CreateInput struct {
 	// Optional fields: absent from payload when zero-value.
 	Opportunity string // payload "opportunity" — omitted when ""
 	IUI         string // payload "iui" — omitted when ""
+}
+
+// ---------------------------------------------------------------------------
+// dynOutputEntry — typed element for the dynamicOutputs array
+// ---------------------------------------------------------------------------
+
+// dynOutputEntry is the element type for the dynamicOutputs[] array emitted in
+// the POST /api/reservation/aws payload. Using a typed struct (rather than
+// map[string]string) ensures consistent key ordering in the marshalled JSON.
+type dynOutputEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +139,13 @@ type CreateInput struct {
 //   - "opportunity" is omitted when CreateInput.Opportunity == "".
 //   - "iui" is omitted when CreateInput.IUI == "".
 func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]string, in CreateInput) ([]byte, error) {
+	// Guard 1 — json.Valid check at entry point (audit remediation item 2).
+	// Explicit early failure with a clear message, before any other processing.
+	// Prevents silent pass-through of invalid bytes into the outer json.Marshal.
+	if !json.Valid(platformRaw) {
+		return nil, fmt.Errorf("platformRaw is not valid JSON")
+	}
+
 	// Collect and sort dynamic output keys for deterministic emission (E10).
 	// Both the dynamicOutputs[] array and the flat top-level keys use this order.
 	sortedKeys := make([]string, 0, len(dynamicOutputs))
@@ -95,12 +154,22 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 	}
 	sort.Strings(sortedKeys)
 
-	// Build the dynamicOutputs array in sorted key order.
-	dynArray := make([]map[string]string, 0, len(sortedKeys))
+	// Guard 2 — reserved-key collision check (audit remediation item 1, Ei F-02).
+	// A dynamic_outputs key that matches a structural payload field would silently
+	// overwrite it — e.g. key "platform" would replace the verbatim json.RawMessage
+	// with a string, causing TechZone to return 500 (gotchas/techzone.md).
 	for _, k := range sortedKeys {
-		dynArray = append(dynArray, map[string]string{
-			"name":  k,
-			"value": dynamicOutputs[k],
+		if _, reserved := reservedPayloadKeys[k]; reserved {
+			return nil, fmt.Errorf("dynamic_outputs key %q collides with reserved payload field", k)
+		}
+	}
+
+	// Build the dynamicOutputs array in sorted key order.
+	dynArray := make([]dynOutputEntry, 0, len(sortedKeys))
+	for _, k := range sortedKeys {
+		dynArray = append(dynArray, dynOutputEntry{
+			Name:  k,
+			Value: dynamicOutputs[k],
 		})
 	}
 

@@ -61,6 +61,14 @@ type mockTechZoneServer struct {
 	// instead of "Ready".
 	pollShouldFail bool
 
+	// pollResponseSequence: when non-nil, handlePoll uses sequence-based responses.
+	//   - For the nth poll (0-indexed), returns pollResponseSequence[n] as the body.
+	//   - When the index exceeds the slice length, the last element is repeated.
+	//   - An empty string "" represents a nil-status body: `{}`.
+	//   - A non-empty string is used verbatim as the JSON body.
+	// When nil (default), handlePoll uses the readyAfterPollCount/pollShouldFail logic.
+	pollResponseSequence []string
+
 	// --- Canonical read (GET /api/reservation/aws/<id>) ---
 
 	// canonicalReadMode controls what GET /api/reservation/aws/<id> returns:
@@ -192,6 +200,18 @@ func (m *mockTechZoneServer) SetCreateBodyCapture(fn func([]byte)) {
 	m.createBodyCapture = fn
 }
 
+// SetPollResponseSequence installs a poll response sequence.
+// When set (non-nil), handlePoll uses the nth element for the nth poll call
+// (0-indexed). When the index exceeds the slice length, the last element is
+// repeated. An empty string "" causes the response body to be `{}` (no status
+// field), exercising the nil-status retry path in the poll loop.
+// Call before the test step that triggers Create.
+func (m *mockTechZoneServer) SetPollResponseSequence(seq []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pollResponseSequence = seq
+}
+
 // URL returns the base URL of the mock server (e.g. "http://127.0.0.1:PORT").
 func (m *mockTechZoneServer) URL() string {
 	return m.server.URL
@@ -321,11 +341,31 @@ func (m *mockTechZoneServer) handlePoll(w http.ResponseWriter, _ *http.Request) 
 	m.pollCount++
 	readyAfter := m.readyAfterPollCount
 	fail := m.pollShouldFail
+	seq := m.pollResponseSequence
 	m.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
+	// Sequence-based mode: when pollResponseSequence is set, use it.
+	// This exercises paths the simple readyAfterPollCount logic cannot reach
+	// (e.g. nil-status responses that trigger warn+continue in the poll loop).
+	if seq != nil {
+		idx := count
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		body := seq[idx]
+		if body == "" {
+			// An empty string in the sequence means "nil-status body": no status field.
+			fmt.Fprint(w, `{}`)
+		} else {
+			fmt.Fprint(w, body)
+		}
+		return
+	}
+
+	// Default mode: readyAfterPollCount / pollShouldFail logic (backwards compatible).
 	if count < readyAfter {
 		fmt.Fprint(w, `{"status":"Provisioning"}`)
 		return
