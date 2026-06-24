@@ -16,8 +16,9 @@ import (
 // ---------------------------------------------------------------------------
 
 // mockTechZoneServer is a configurable in-process mock of the TechZone API.
-// It handles all four endpoint groups used by the provider:
+// It handles all five endpoint groups used by the provider:
 //
+//	GET  /api/collection/<id>                    — collection fetch (E5)
 //	POST /api/reservation/aws                    — create
 //	GET  /api/reservation/<id>                   — poll (status only)
 //	GET  /api/reservation/aws/<id>               — canonical read
@@ -31,10 +32,23 @@ type mockTechZoneServer struct {
 
 	mu sync.Mutex
 
+	// --- Collection fetch (GET /api/collection/<id>) — E5 addition ---
+
+	// collectionResponses maps collection ID → {statusCode, body}.
+	// If the requested ID is not in the map, returns 404.
+	collectionResponses map[string]mockCollectionResponse
+
 	// --- Create (POST /api/reservation/aws) ---
 
 	// createShouldFail: when true, POST returns 500 instead of 200+id.
 	createShouldFail bool
+
+	// createBodyCapture: if non-nil, called with the raw POST body on each create.
+	// Goroutine-safe: called under mu.
+	createBodyCapture func([]byte)
+
+	// createCallCount: number of times POST /api/reservation/aws was called.
+	createCallCount int
 
 	// --- Poll (GET /api/reservation/<id>) ---
 
@@ -89,6 +103,12 @@ type mockTechZoneServer struct {
 	AuthHeaders []string
 }
 
+// mockCollectionResponse holds the canned HTTP response for a collection ID.
+type mockCollectionResponse struct {
+	statusCode int
+	body       string
+}
+
 // newMockServer creates and starts a new mockTechZoneServer.
 // The server is automatically closed when the test ends.
 func newMockServer(t *testing.T) *mockTechZoneServer {
@@ -98,10 +118,35 @@ func newMockServer(t *testing.T) *mockTechZoneServer {
 		canonicalReadMode:    "ready",
 		tokenValidateMode:    "valid",
 		deleteStatusSequence: []int{200},
+		collectionResponses:  make(map[string]mockCollectionResponse),
 	}
 	m.server = httptest.NewServer(http.HandlerFunc(m.ServeHTTP))
 	t.Cleanup(m.server.Close)
 	return m
+}
+
+// SetCollectionResponse registers a canned response for GET /api/collection/<id>.
+// The server returns statusCode and body for requests matching that collection ID.
+// Call before the test step that triggers Create.
+func (m *mockTechZoneServer) SetCollectionResponse(collectionID string, statusCode int, body string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.collectionResponses == nil {
+		m.collectionResponses = make(map[string]mockCollectionResponse)
+	}
+	m.collectionResponses[collectionID] = mockCollectionResponse{
+		statusCode: statusCode,
+		body:       body,
+	}
+}
+
+// SetCreateBodyCapture installs a callback that receives the raw POST body of
+// each POST /api/reservation/aws call. Called under m.mu — the callback must
+// not call any m.* methods to avoid deadlock.
+func (m *mockTechZoneServer) SetCreateBodyCapture(fn func([]byte)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createBodyCapture = fn
 }
 
 // URL returns the base URL of the mock server (e.g. "http://127.0.0.1:PORT").
@@ -123,6 +168,11 @@ func (m *mockTechZoneServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/my/reservations/all":
 		m.handleTokenValidate(w, r)
+
+	// Collection fetch MUST be matched before /api/reservation/ prefix checks
+	// because /api/collection/ is a different path prefix entirely.
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/collection/"):
+		m.handleCollection(w, r)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/api/reservation/aws":
 		m.handleCreate(w, r)
@@ -166,11 +216,49 @@ func (m *mockTechZoneServer) handleTokenValidate(w http.ResponseWriter, _ *http.
 	}
 }
 
+// handleCollection — GET /api/collection/<id>
+//
+// Returns a canned response registered via SetCollectionResponse.
+// If no response is registered for the given ID, returns 404.
+func (m *mockTechZoneServer) handleCollection(w http.ResponseWriter, r *http.Request) {
+	// Extract the collection ID from the path: /api/collection/<id>
+	id := strings.TrimPrefix(r.URL.Path, "/api/collection/")
+
+	m.mu.Lock()
+	resp, ok := m.collectionResponses[id]
+	m.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":"collection not found"}`)
+		return
+	}
+	w.WriteHeader(resp.statusCode)
+	fmt.Fprint(w, resp.body)
+}
+
 // handleCreate — POST /api/reservation/aws
-func (m *mockTechZoneServer) handleCreate(w http.ResponseWriter, _ *http.Request) {
+func (m *mockTechZoneServer) handleCreate(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	fail := m.createShouldFail
+	capture := m.createBodyCapture
+	m.createCallCount++
 	m.mu.Unlock()
+
+	// Capture the body if a capture callback is registered.
+	// Body can only be read once, so we always drain it here.
+	if capture != nil {
+		var bodyBytes []byte
+		if r.Body != nil {
+			buf := make([]byte, 1<<20) // 1 MiB — more than enough for any reservation payload
+			n, _ := r.Body.Read(buf)
+			bodyBytes = buf[:n]
+		}
+		m.mu.Lock()
+		capture(bodyBytes)
+		m.mu.Unlock()
+	}
 
 	if fail {
 		w.WriteHeader(http.StatusInternalServerError)

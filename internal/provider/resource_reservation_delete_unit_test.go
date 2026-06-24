@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -47,6 +48,12 @@ func resourceSchemaForDelete(t *testing.T) rschema.Schema {
 
 // buildDeleteState constructs a tfsdk.State populated with a minimal but valid
 // reservationModel containing reservationID so that req.State.Get() succeeds in Delete.
+//
+// E5 update: Template, HCPOrg, HCPProject removed from reservationModel;
+// DynamicOutputs map(string) added.
+//
+// RED: this helper will not compile until Kou updates reservationModel in E5 Task 2
+// (removes Template/HCPOrg/HCPProject fields, adds DynamicOutputs types.Map field).
 func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsdk.State {
 	t.Helper()
 	ctx := context.Background()
@@ -68,15 +75,27 @@ func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsd
 		t.Fatalf("building empty service_links: %v", diags)
 	}
 
+	// E5: populate DynamicOutputs with two representative entries.
+	// The delete path reads only UserEmail and ID from state, so the exact
+	// values here do not affect Delete behaviour — they just need to be
+	// structurally valid for the schema to accept state.Set().
+	dynMap, dynDiags := types.MapValue(types.StringType, map[string]attr.Value{
+		"_04_hcp_org":     types.StringValue("test-hcp-org"),
+		"_05_hcp_project": types.StringValue("test-hcp-project"),
+	})
+	if dynDiags.HasError() {
+		t.Fatalf("building dynamic_outputs map: %v", dynDiags)
+	}
+
+	// New-contract model: Template/HCPOrg/HCPProject removed; DynamicOutputs added.
+	// COMPILE-FAIL RED until Kou updates reservationModel.
 	m := reservationModel{
-		Template:                types.StringValue("template-example"),
+		DynamicOutputs:          dynMap,
 		Region:                  types.StringValue("us-east-2"),
 		ReservationName:         types.StringValue("Reservation Name"),
 		Purpose:                 types.StringValue("Demo"),
 		CollectionID:            types.StringValue("test-collection-id"),
 		UserEmail:               types.StringValue("test@example.com"),
-		HCPOrg:                  types.StringValue("test-hcp-org"),
-		HCPProject:              types.StringValue("test-hcp-project"),
 		ReservationDurationDays: types.Int64Value(1),
 		TimeoutMinutes:          types.Int64Value(30),
 		ID:                      types.StringValue(reservationID),
