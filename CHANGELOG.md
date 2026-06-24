@@ -5,6 +5,35 @@ Entries from v1.0.0 onward are generated automatically by [release-please](https
 
 <!-- release-please inserts new entries above this line -->
 
+## [2.0.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v1.0.0...v2.0.0) (2026-06-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* provider now follows semantic versioning with automated releases via release-please. Manual tagging is no longer required.
+
+### Features
+
+* All packages updated ([#1](https://github.com/shoootyou/terraform-provider-techzone/issues/1)) ([03dcd56](https://github.com/shoootyou/terraform-provider-techzone/commit/03dcd5627b153a772bb35c903391973ca9870b51))
+* automated release pipeline + stable v1.0.0 ([834624b](https://github.com/shoootyou/terraform-provider-techzone/commit/834624b87ae48c3009e050494540b20f04c06a02))
+* First clean release ([#12](https://github.com/shoootyou/terraform-provider-techzone/issues/12)) ([3b53dee](https://github.com/shoootyou/terraform-provider-techzone/commit/3b53dee0df727d0c861cb93546d1d81101ad2558))
+* **provider:** config + native token validation (VCDLD-1691) ([2bcdb6b](https://github.com/shoootyou/terraform-provider-techzone/commit/2bcdb6bd6f64ede6c2bf0a2c328f8991a6ff059e))
+* **provider:** techzone_reservation resource + prune/expiry (VCDLD-1691) ([b335ff0](https://github.com/shoootyou/terraform-provider-techzone/commit/b335ff051f4ec43e696e21ff26ab2cb636e72b7f))
+
+
+### Bug Fixes
+
+* add registry-compliant provider documentation ([e41a6fe](https://github.com/shoootyou/terraform-provider-techzone/commit/e41a6feef4c3a813146b7cfcf4d72cba634b0be7))
+* add tflog diagnostics to silent-retry poll paths ([14bf82e](https://github.com/shoootyou/terraform-provider-techzone/commit/14bf82eb642b85e99b9742f86f8f901b18f5e7a2))
+* poll loop url /api/reservation/&lt;id&gt; → /api/reservation/aws/&lt;id&gt; ([0ba7e88](https://github.com/shoootyou/terraform-provider-techzone/commit/0ba7e889ca3e7942de03f4dda53f477c885694d6))
+* **provider:** audit round-1 remediation (VCDLD-1691) ([96900f8](https://github.com/shoootyou/terraform-provider-techzone/commit/96900f8d3f2bb0203f675d2216a4c855a407e595))
+* **provider:** Delete option-B — actionable auth-failure error, state preserved (VCDLD-1691) ([3ade2d7](https://github.com/shoootyou/terraform-provider-techzone/commit/3ade2d70099645c7ab69192525b955ac53be63d5))
+
+
+### Documentation
+
+* add CHANGELOG.md — v0.2.0 notes (VCDLD-1691) ([549dcbc](https://github.com/shoootyou/terraform-provider-techzone/commit/549dcbcc6b2050c8f0d4c29b1bf28b408995a3f5))
+
 ## [1.0.0](https://github.com/shoootyou/terraform-provider-techzone/compare/v0.4.0...v1.0.0) (2026-06-24)
 
 
