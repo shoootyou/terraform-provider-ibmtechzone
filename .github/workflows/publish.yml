@@ -44,7 +44,7 @@ jobs:
           VERSION: ${{ inputs.release_tag }}
           TFC_ORG: ${{ inputs.tfc_org }}
           TFC_PROVIDER: techzone
-          GPG_KEY_ID: 62DFD2F5BC78EB4C
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
