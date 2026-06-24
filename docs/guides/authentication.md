@@ -4,19 +4,13 @@ page_title: "Authentication — TechZone API Token"
 
 # Authentication
 
-The TechZone provider authenticates using a browser-session bearer token issued
-by IBM TechZone. There is no machine-credential or service-account mechanism —
-the token is tied to a human IBM ID.
+The TechZone provider authenticates using a user token issued by IBM TechZone. 
 
 ## Obtaining the token
 
 1. Log in to [IBM TechZone](https://techzone.ibm.com) with your IBM ID.
 2. Navigate to **My Profile** (top-right menu).
 3. Copy the API token shown on your profile page.
-
-~> **Warning** This token is a short-lived browser session credential. It expires
-when your TechZone session ends or after a period of inactivity. You must refresh
-it for each new Terraform run if the previous token has expired.
 
 ## Configuring the token
 

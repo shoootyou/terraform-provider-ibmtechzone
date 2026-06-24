@@ -41,7 +41,8 @@ builds:
 
 archives:
   - id: terraform-provider-techzone
-    format: zip
+    formats:
+      - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     # Include the registry manifest in every archive so TFC can resolve the
     # protocol version without a separate manifest download step.
@@ -56,9 +57,13 @@ signs:
   - id: gpg-sign-checksums
     # Sign only the SHA256SUMS file; the registry verifies this signature.
     # $GPG_FINGERPRINT is set from the GitHub Actions secret at release time.
+    # --pinentry-mode loopback: required in CI — prevents GPG from opening a
+    # TTY to prompt for passphrase (causes "Inappropriate ioctl for device").
     artifacts: checksum
     args:
       - "--batch"
+      - "--pinentry-mode"
+      - "loopback"
       - "--local-user"
       - "${GPG_FINGERPRINT}"
       - "--output"
@@ -70,9 +75,8 @@ release:
   # Create a GitHub Release; the release workflow then uploads the artifacts to
   # the TFC private registry (RFC §8.4 — Option A: GitHub Release first, then
   # POST to registry upload-links API).
-  github:
-    owner: shoootyou-ext
-    name: terraform-provider-techzone
+  # owner/name resolved automatically from GITHUB_TOKEN context — no hardcoded
+  # repo reference so the config survives repository transfers.
   extra_files:
     - glob: terraform-registry-manifest.json
 
