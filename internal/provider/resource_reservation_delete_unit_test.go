@@ -24,7 +24,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
 )
 
 // sentinelTokenInternal is the sentinel value used for token-safety assertions

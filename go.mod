@@ -1,4 +1,4 @@
-module github.com/shoootyou-ext/terraform-provider-techzone
+module github.com/shoootyou-ext/terraform-provider-ibmtechzone
 
 go 1.26.4
 

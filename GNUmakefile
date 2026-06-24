@@ -1,7 +1,7 @@
 default: build
 
 # Go binary output name
-BINARY := terraform-provider-techzone
+BINARY := terraform-provider-ibmtechzone
 
 # Build the provider binary for the local platform.
 build:

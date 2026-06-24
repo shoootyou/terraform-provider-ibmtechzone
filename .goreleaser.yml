@@ -3,10 +3,10 @@
 # provider registry (RFC §8.4). See RFC §8.2 for GPG key custody rules.
 #
 # Artifact set per release:
-#   terraform-provider-techzone_{version}_{os}_{arch}.zip  (one per target)
-#   terraform-provider-techzone_{version}_SHA256SUMS        (sha256 checksums)
-#   terraform-provider-techzone_{version}_SHA256SUMS.sig    (GPG signature over SHA256SUMS)
-#   terraform-provider-techzone_{version}_manifest.json     (registry protocol manifest)
+#   terraform-provider-ibmtechzone_{version}_{os}_{arch}.zip  (one per target)
+#   terraform-provider-ibmtechzone_{version}_SHA256SUMS        (sha256 checksums)
+#   terraform-provider-ibmtechzone_{version}_SHA256SUMS.sig    (GPG signature over SHA256SUMS)
+#   terraform-provider-ibmtechzone_{version}_manifest.json     (registry protocol manifest)
 #
 # GPG signing uses the fingerprint in $GPG_FINGERPRINT — never a hardcoded key.
 # The signing key and fingerprint are stored in GitHub Actions secrets
@@ -19,7 +19,7 @@ before:
     - go mod tidy
 
 builds:
-  - id: terraform-provider-techzone
+  - id: terraform-provider-ibmtechzone
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
@@ -40,7 +40,7 @@ builds:
       - CGO_ENABLED=0
 
 archives:
-  - id: terraform-provider-techzone
+  - id: terraform-provider-ibmtechzone
     formats:
       - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"

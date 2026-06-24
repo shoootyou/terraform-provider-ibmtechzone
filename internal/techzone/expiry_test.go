@@ -80,7 +80,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
 )
 
 // ---------------------------------------------------------------------------

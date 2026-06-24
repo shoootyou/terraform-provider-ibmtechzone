@@ -25,7 +25,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
 )
 
 // Ensure reservationResource satisfies the resource.Resource interface.

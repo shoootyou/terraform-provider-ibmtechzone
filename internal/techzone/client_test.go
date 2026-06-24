@@ -49,7 +49,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
 )
 
 // sentinelToken is used across all tests to verify the api_key value never leaks

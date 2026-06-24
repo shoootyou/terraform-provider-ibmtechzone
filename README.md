@@ -1,4 +1,4 @@
-# terraform-provider-techzone
+# terraform-provider-ibmtechzone
 
 Terraform provider for IBM TechZone AWS account reservations.
 

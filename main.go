@@ -9,7 +9,7 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/provider"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/provider"
 )
 
 // Registry source address used for local development and CI.

@@ -1,7 +1,7 @@
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MPL-2.0
 
-// Package provider implements the terraform-provider-techzone plugin.
+// Package provider implements the terraform-provider-ibmtechzone plugin.
 //
 // # Token-safety contract (RFC §4, Ei F-02)
 //
@@ -27,7 +27,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/techzone"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
 )
 
 // Ensure Provider satisfies the provider.Provider interface at compile time.

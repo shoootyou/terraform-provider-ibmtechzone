@@ -6,8 +6,8 @@ temporal.auto.tfvars
 
 # ── Go build artifacts ───────────────────────────────────────────────────────
 # Built provider binary (local `make build` output)
-terraform-provider-techzone
-terraform-provider-techzone.exe
+terraform-provider-ibmtechzone
+terraform-provider-ibmtechzone.exe
 
 # GoReleaser output directory
 /dist/

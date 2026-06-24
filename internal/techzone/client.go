@@ -1,7 +1,7 @@
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MPL-2.0
 
-// Package techzone provides the HTTP client used by the terraform-provider-techzone
+// Package techzone provides the HTTP client used by the terraform-provider-ibmtechzone
 // provider to communicate with the IBM TechZone reservation API.
 //
 // # Token-safety contract (RFC §4 / Ei F-02)

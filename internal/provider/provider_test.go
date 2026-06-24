@@ -15,7 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/shoootyou-ext/terraform-provider-techzone/internal/provider"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/provider"
 )
 
 // testAccProtoV6ProviderFactories is shared by tests that don't need a custom server.

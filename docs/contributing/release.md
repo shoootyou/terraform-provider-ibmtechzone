@@ -104,9 +104,9 @@ GoReleaser v2 produces the following artifacts per release. See
 
 | Artifact | Description |
 |---|---|
-| `terraform-provider-techzone_{version}_{os}_{arch}.zip` | Provider binary for each target platform (5 total) |
-| `terraform-provider-techzone_{version}_SHA256SUMS` | SHA-256 checksums for all zips |
-| `terraform-provider-techzone_{version}_SHA256SUMS.sig` | GPG detached signature over `SHA256SUMS` |
+| `terraform-provider-ibmtechzone_{version}_{os}_{arch}.zip` | Provider binary for each target platform (5 total) |
+| `terraform-provider-ibmtechzone_{version}_SHA256SUMS` | SHA-256 checksums for all zips |
+| `terraform-provider-ibmtechzone_{version}_SHA256SUMS.sig` | GPG detached signature over `SHA256SUMS` |
 | `terraform-registry-manifest.json` | Registry protocol manifest (protocol `6.0`) |
 
 **Target platforms:** `linux/amd64`, `linux/arm64`, `darwin/amd64`,
