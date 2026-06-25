@@ -21,13 +21,20 @@ resource "ibmtechzone_reservation" "example" {
   collection_id = "5f43a1b2c3d4e5f6a7b8c9d0"
   user_email    = "user@example.com"
 
-  # template_variables: opaque _NN_ keys injected into the reservation payload.
-  # Keys are emitted in lexicographic order in both the dynamicOutputs[] array
-  # (TechZone API wire field) and as flat top-level keys (dual-emit).
-  # An empty map {} is valid.
+  # template_variables: opaque _NN_name keys injected into the reservation payload.
+  # Keys are mapped to the TechZone API's dynamicOutputs wire field, emitted in
+  # lexicographic order as both a dynamicOutputs[] array and flat top-level keys
+  # (dual-emit). An empty map {} is valid.
   template_variables = {
-    "_04_hcp_org"     = "org-AbCdEfGh"
-    "_05_hcp_project" = "project-XxYyZz12"
+    "_03_account_cleanup" = "true"
+    "_04_hcp_org"         = "org-AbCdEfGh"
+    "_05_hcp_project"     = "project-XxYyZz12"
+  }
+
+  # requester_context: optional block for opportunity / account attribution.
+  requester_context {
+    opportunity = ["006Ka00000NPHdITZSTG"]
+    iui         = "ABC123DEF"
   }
 
   # Optional — shown with non-default values
@@ -72,11 +79,17 @@ The following arguments are supported:
 
   An empty map (`{}`) is valid: it produces `"dynamicOutputs": []` and no flat
   keys. Keys conventionally follow the `_NN_name` pattern used by TechZone
-  template variables (e.g. `_04_hcp_org`, `_05_hcp_project`), but the provider
-  does not validate key format — the naming convention is enforced by TechZone,
-  not the schema. Keys must not collide with reserved payload fields (the
-  provider returns a plan-time error if they do).
+  template variables (e.g. `_03_account_cleanup`, `_04_hcp_org`, `_05_hcp_project`),
+  but the provider does not validate key format — the naming convention is enforced
+  by TechZone, not the schema. Keys must not collide with reserved payload fields
+  (the provider returns a plan-time error if they do).
   Changing this value forces a new resource.
+
+* `requester_context` - (Optional, Block) Requester and account context for the
+  reservation. Contains:
+  * `opportunity` - (Optional, List of String) Salesforce opportunity IDs associated
+    with this reservation (e.g. `["006Ka00000NPHdITZSTG"]`).
+  * `iui` - (Optional, String) IBM User ID (IUI) for account attribution.
 
 * `region` - (Optional) AWS region override. Defaults to `us-east-2`.
   When omitted, the default is applied automatically — no explicit value is

@@ -23,7 +23,7 @@ export TECHZONE_API_KEY="<your-techzone-token>"
 Or pass it directly in the provider block (not recommended for shared configs):
 
 ```hcl
-provider "techzone" {
+provider "ibmtechzone" {
   api_key = "<your-techzone-token>"
 }
 ```

@@ -7,9 +7,9 @@ Terraform provider for IBM TechZone AWS account reservations.
 ```hcl
 terraform {
   required_providers {
-    techzone = {
-      source  = "shoootyou/ibmtechzone"
-      version = "= 1.0"
+    ibmtechzone = {
+      source  = "registry.terraform.io/shoootyou/ibmtechzone"
+      version = "~> 0.2"
     }
   }
 }
@@ -18,15 +18,19 @@ terraform {
 ## Quick start
 
 ```hcl
-provider "techzone" {
+provider "ibmtechzone" {
   # api_key is read from TECHZONE_API_KEY if not set here.
 }
 
 resource "ibmtechzone_reservation" "example" {
-  collection_id = "abc123"
+  collection_id = "5f43a1b2c3d4e5f6a7b8c9d0"
   user_email    = "user@example.com"
-  hcp_org       = "org-XXXXXXXX"
-  hcp_project   = "project-XXXXXXXX"
+
+  template_variables = {
+    "_03_account_cleanup" = "true"
+    "_04_hcp_org"         = "org-XXXXXXXX"
+    "_05_hcp_project"     = "project-XXXXXXXX"
+  }
 }
 ```
 

@@ -1,4 +1,4 @@
-# techzone Provider
+# ibmtechzone Provider
 
 Manages IBM TechZone AWS account reservations. The provider provisions temporary
 AWS cloud accounts from the TechZone pool via the TechZone API.
@@ -11,14 +11,14 @@ AWS cloud accounts from the TechZone pool via the TechZone API.
 ```hcl
 terraform {
   required_providers {
-    techzone = {
-      source  = "shoootyou/ibmtechzone"
-      version = "= 1.0"
+    ibmtechzone = {
+      source  = "registry.terraform.io/shoootyou/ibmtechzone"
+      version = "~> 0.2"
     }
   }
 }
 
-provider "techzone" {
+provider "ibmtechzone" {
   # api_key is read from TECHZONE_API_KEY if not set here
 }
 ```

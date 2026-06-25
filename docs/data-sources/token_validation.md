@@ -17,10 +17,18 @@ resource "ibmtechzone_reservation" "example" {
   # is created or read.
   depends_on = [data.ibmtechzone_token_validation.check]
 
-  collection_id = "abc123def456789"
+  collection_id = "5f43a1b2c3d4e5f6a7b8c9d0"
   user_email    = "user@example.com"
-  hcp_org       = "org-AbCdEfGh"
-  hcp_project   = "project-XxYyZz12"
+
+  template_variables = {
+    "_03_account_cleanup" = "true"
+    "_04_hcp_org"         = "org-AbCdEfGh"
+    "_05_hcp_project"     = "project-XxYyZz12"
+  }
+
+  requester_context {
+    opportunity = ["006Ka00000NPHdITZSTG"]
+  }
 }
 ```
 
