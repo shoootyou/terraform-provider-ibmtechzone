@@ -115,15 +115,6 @@ func (c *Client) GetCollection(ctx context.Context, id string) (*Collection, err
 		return nil, ErrCollectionNotFound
 
 	case status >= 500 && status <= 599:
-		// Log the discarded body at debug level (token-safe: body does not contain
-		// the bearer token, but we still truncate to avoid noise in logs).
-		if len(body) > 0 {
-			truncated := string(body)
-			if len(truncated) > 200 {
-				truncated = truncated[:200] + "…"
-			}
-			_ = truncated // available for debug log if tflog is wired here
-		}
 		return nil, fmt.Errorf("collection fetch failed (HTTP %d): %w", status, ErrCollectionUnavailable)
 
 	case status < 200 || status > 299:

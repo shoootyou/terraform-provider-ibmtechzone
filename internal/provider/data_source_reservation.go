@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -124,7 +125,7 @@ func (d *reservationDataSource) Read(ctx context.Context, req datasource.ReadReq
 		return
 	}
 
-	httpStatus, body, err := d.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+	httpStatus, body, err := d.pd.Client.DoGet(ctx, "/api/reservation/aws/"+url.PathEscape(reservationID))
 	if err != nil {
 		resp.Diagnostics.AddError("TechZone API unreachable",
 			fmt.Sprintf("GET /api/reservation/aws/%s: %s", reservationID, err.Error()))
@@ -138,9 +139,18 @@ func (d *reservationDataSource) Read(ctx context.Context, req datasource.ReadReq
 	}
 
 	if httpStatus < 200 || httpStatus >= 300 {
-		resp.Diagnostics.AddError("TechZone API error",
-			fmt.Sprintf("GET /api/reservation/aws/%s returned HTTP %d. Body: %s",
-				reservationID, httpStatus, truncate(body, 512)))
+		// Suppress body content at 401/403 — auth-rejection bodies may contain
+		// SSO redirect HTML or session metadata (same guard as the poll loop in
+		// resource_reservation.go).
+		var dsErrDetail string
+		if httpStatus == 401 || httpStatus == 403 {
+			dsErrDetail = fmt.Sprintf("GET /api/reservation/aws/%s returned HTTP %d.",
+				reservationID, httpStatus)
+		} else {
+			dsErrDetail = fmt.Sprintf("GET /api/reservation/aws/%s returned HTTP %d. Body: %s",
+				reservationID, httpStatus, truncate(body, 512))
+		}
+		resp.Diagnostics.AddError("TechZone API error", dsErrDetail)
 		return
 	}
 

@@ -9,8 +9,8 @@
 #   terraform-provider-ibmtechzone_{version}_manifest.json     (registry protocol manifest)
 #
 # GPG signing uses the fingerprint in $GPG_FINGERPRINT — never a hardcoded key.
-# The signing key and fingerprint are stored in GitHub Actions secrets
-# (GPG_PRIVATE_KEY, GPG_FINGERPRINT) and never committed to the repository.
+# The signing key, fingerprint, and passphrase are stored in GitHub Actions secrets
+# (GPG_PRIVATE_KEY, GPG_FINGERPRINT, GPG_PASSPHRASE) and never committed to the repository.
 version: 2
 
 # project_name overrides the default (repo directory name "terraform-provider-techzone")

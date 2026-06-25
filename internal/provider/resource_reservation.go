@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"time"
 
@@ -197,16 +198,14 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 				Validators: []validator.String{
-					// Prevent path-traversal injection in GET /api/collection/<id>
-					// (Ei F-01). Note: url.PathEscape in GetCollection already encodes
-					// path-significant characters, providing defense-in-depth. This
-					// validator provides an early plan-time rejection for obvious invalid
-					// inputs while allowing non-MongoDB-ObjectID identifiers (e.g.
-					// "test-collection-id") used in testing and future API variants.
-					// Pattern: printable ASCII, no slashes, dots, or whitespace.
+					// Enforce strict MongoDB ObjectID format (Ei audit F-01): 24-char hex.
+					// This matches the MarkdownDescription ("24-character hexadecimal string")
+					// and all observed TechZone collection IDs. url.PathEscape in GetCollection
+					// provides a second layer, but schema validation catches bad inputs at
+					// plan time before any HTTP call is made.
 					stringvalidator.RegexMatches(
-						regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`),
-						"must be 1–64 characters using only letters, digits, hyphens, or underscores",
+						regexp.MustCompile(`^[a-fA-F0-9]{24}$`),
+						"must be a 24-character hexadecimal string (MongoDB ObjectID format)",
 					),
 				},
 			},
@@ -490,7 +489,7 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 		// The legacy /api/reservation/<id> returns HTTP 302, which the client sees raw
 		// (redirect-following is disabled for SSO-token-expiry detection) and treats as
 		// non-2xx, causing the poll loop to retry forever. Use the typed endpoint instead.
-		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+url.PathEscape(reservationID))
 		if pollErr != nil {
 			tflog.Warn(ctx, "Poll connectivity error, retrying", map[string]any{
 				"reservation_id": reservationID,
@@ -568,7 +567,7 @@ pollDone:
 	// documented improvement (RFC §3.1: the bash final GET was un-hardened).
 	var finalResp *tzReservationResponse
 	for attempt := int64(0); attempt < maxAttempts; attempt++ {
-		canStatus, canBody, canErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+		canStatus, canBody, canErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+url.PathEscape(reservationID))
 		if canErr != nil {
 			tflog.Warn(ctx, "Final GET connectivity error, retrying", map[string]any{
 				"reservation_id": reservationID,
@@ -584,12 +583,17 @@ pollDone:
 			continue
 		}
 		if canStatus < 200 || canStatus >= 300 {
-			tflog.Warn(ctx, "Final GET returned non-2xx status, retrying", map[string]any{
+			// Suppress body_preview at 401/403 — same guard as the poll loop above.
+			// Auth-rejection bodies may contain SSO redirect HTML or session metadata.
+			finalLogFields := map[string]any{
 				"reservation_id": reservationID,
 				"attempt":        attempt,
 				"http_status":    canStatus,
-				"body_preview":   truncate(canBody, 200),
-			})
+			}
+			if canStatus != 401 && canStatus != 403 {
+				finalLogFields["body_preview"] = truncate(canBody, 200)
+			}
+			tflog.Warn(ctx, "Final GET returned non-2xx status, retrying", finalLogFields)
 			select {
 			case <-ctx.Done():
 				resp.Diagnostics.AddError("Context cancelled", "Interrupted during final read after reservation became Ready.")
@@ -659,7 +663,7 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	httpStatus, body, err := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
+	httpStatus, body, err := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+url.PathEscape(reservationID))
 	if err != nil {
 		resp.Diagnostics.AddError("TechZone API unreachable during Read",
 			fmt.Sprintf("GET /api/reservation/aws/%s: %s", reservationID, err.Error()))
@@ -772,7 +776,7 @@ func (r *reservationResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	httpStatus, body, err := r.pd.Client.DoDelete(ctx, "/api/reservation/aws/"+reservationID, deletePayload)
+	httpStatus, body, err := r.pd.Client.DoDelete(ctx, "/api/reservation/aws/"+url.PathEscape(reservationID), deletePayload)
 	if err != nil {
 		// True transport failure (non-nil err with no usable HTTP response) →
 		// AddError (audit fix Sho-A #3 / medium finding #4).
