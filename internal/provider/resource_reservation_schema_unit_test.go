@@ -1,7 +1,7 @@
 /**
  * @spec-handoff
  *
- * @interface reservationResource.Schema — techzone_reservation schema (post-Plan-114 live fix)
+ * @interface reservationResource.Schema — ibmtechzone_reservation schema (post-Plan-114 live fix)
  *
  * @behavior
  *   - `template`    attribute MUST NOT exist in the schema (removed in E5).

@@ -163,7 +163,7 @@ const vmwareCollectionJSON = `{
 // It omits template/hcp_org/hcp_project and populates dynamic_outputs.
 func reservationConfigV2(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
-resource "techzone_reservation" "test" {
+resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
   dynamic_outputs           = {
@@ -179,7 +179,7 @@ resource "techzone_reservation" "test" {
 // reservationConfigV2_EmptyOutputs uses an empty dynamic_outputs map.
 func reservationConfigV2_EmptyOutputs(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
-resource "techzone_reservation" "test" {
+resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
   dynamic_outputs           = {}
@@ -224,8 +224,8 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 			{
 				Config: reservationConfigV2(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
 				),
 			},
 		},
@@ -359,7 +359,7 @@ func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 			{
 				Config: reservationConfigV2_EmptyOutputs(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 		},
@@ -410,7 +410,7 @@ func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 // requester_context with opportunity + iui, exercising the new schema attribute.
 func reservationConfigV2_WithRequesterContext(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
-resource "techzone_reservation" "test" {
+resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
   dynamic_outputs           = {
@@ -450,8 +450,8 @@ func TestReservationCreate_Wired_WithRequesterContext(t *testing.T) {
 			{
 				Config: reservationConfigV2_WithRequesterContext(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
 				),
 			},
 		},
@@ -517,7 +517,7 @@ func TestReservationCreate_Wired_NoRequesterContext(t *testing.T) {
 			{
 				Config: reservationConfigV2(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 		},

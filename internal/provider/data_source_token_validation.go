@@ -11,7 +11,7 @@ import (
 // Ensure tokenValidationDataSource satisfies the datasource.DataSource interface.
 var _ datasource.DataSource = &tokenValidationDataSource{}
 
-// tokenValidationDataSource implements the techzone_token_validation data source.
+// tokenValidationDataSource implements the ibmtechzone_token_validation data source.
 //
 // This is a zero-input, plan-time gate that emits { status = "valid" } when the
 // provider's configured token is valid. It reuses the probe result stored in
@@ -37,7 +37,7 @@ func (d *tokenValidationDataSource) Metadata(_ context.Context, req datasource.M
 	resp.TypeName = req.ProviderTypeName + "_token_validation"
 }
 
-// Schema returns the schema for the techzone_token_validation data source.
+// Schema returns the schema for the ibmtechzone_token_validation data source.
 // Zero inputs; one computed output: status = "valid".
 func (d *tokenValidationDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{

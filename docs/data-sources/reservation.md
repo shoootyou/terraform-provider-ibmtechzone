@@ -1,21 +1,21 @@
-# techzone_reservation (Data Source)
+# ibmtechzone_reservation (Data Source)
 
 Reads an existing IBM TechZone reservation by ID. Use this data source for
 read-only references to reservations that are managed outside of Terraform,
 or to look up reservation outputs from a separately-managed resource.
 
 -> **Note** For lifecycle management (create, update, destroy) use the
-[techzone_reservation](../resources/reservation.md) resource instead.
+[ibmtechzone_reservation](../resources/reservation.md) resource instead.
 
 ## Example Usage
 
 ```hcl
-data "techzone_reservation" "existing" {
+data "ibmtechzone_reservation" "existing" {
   id = "6a3a88315f5d5f7d8f5aa373"
 }
 
 output "console_links" {
-  value = data.techzone_reservation.existing.service_links
+  value = data.ibmtechzone_reservation.existing.service_links
 }
 ```
 

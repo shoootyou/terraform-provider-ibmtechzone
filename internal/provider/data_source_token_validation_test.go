@@ -9,12 +9,12 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// techzone_token_validation data source tests
+// ibmtechzone_token_validation data source tests
 // ---------------------------------------------------------------------------
 
 // TestDataSource_TokenValidation_ReturnsStatusValid verifies that with a correctly
 // configured provider (mock server returning 200 + JSON), the
-// techzone_token_validation data source:
+// ibmtechzone_token_validation data source:
 //   - reads successfully with no diagnostics
 //   - exposes status = "valid"
 //
@@ -33,12 +33,12 @@ func TestDataSource_TokenValidation_ReturnsStatusValid(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: providerConfigHCL(srv.URL, sentinelToken) + `
-data "techzone_token_validation" "test" {}
+data "ibmtechzone_token_validation" "test" {}
 `,
 				Check: resource.ComposeAggregateTestCheckFunc(
 					// status must be exactly "valid" — the stub sets "" so this FAILS (RED).
 					resource.TestCheckResourceAttr(
-						"data.techzone_token_validation.test",
+						"data.ibmtechzone_token_validation.test",
 						"status",
 						"valid",
 					),
@@ -58,8 +58,8 @@ func TestDataSource_TokenValidation_ZeroInputs(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: `
-provider "techzone" {}
-data "techzone_token_validation" "test" {}
+provider "ibmtechzone" {}
+data "ibmtechzone_token_validation" "test" {}
 `,
 				// This will fail at Configure (no real token), but the data source
 				// schema itself should not produce unknown-attribute errors.
@@ -70,7 +70,7 @@ data "techzone_token_validation" "test" {}
 }
 
 // TestDataSource_TokenValidation_RegistrationInProvider verifies that the provider
-// actually registers the techzone_token_validation data source type in DataSources().
+// actually registers the ibmtechzone_token_validation data source type in DataSources().
 // An unregistered data source would produce "Invalid data source type" at plan.
 func TestDataSource_TokenValidation_RegistrationInProvider(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +84,7 @@ func TestDataSource_TokenValidation_RegistrationInProvider(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: providerConfigHCL(srv.URL, sentinelToken) + `
-data "techzone_token_validation" "probe" {}
+data "ibmtechzone_token_validation" "probe" {}
 `,
 				// The data source must be recognised (no "Invalid data source type" error).
 				// The status value check is in TestDataSource_TokenValidation_ReturnsStatusValid.

@@ -22,7 +22,7 @@ provider "techzone" {
   # api_key is read from TECHZONE_API_KEY if not set here.
 }
 
-resource "techzone_reservation" "example" {
+resource "ibmtechzone_reservation" "example" {
   collection_id = "abc123"
   user_email    = "user@example.com"
   hcp_org       = "org-XXXXXXXX"
@@ -38,8 +38,8 @@ export TECHZONE_API_KEY="<your-techzone-token>"
 
 ## Resources and data sources
 
-- [techzone_reservation](docs/resources/reservation.md)
-- [techzone_token_validation](docs/data-sources/token_validation.md)
+- [ibmtechzone_reservation](docs/resources/reservation.md)
+- [ibmtechzone_token_validation](docs/data-sources/token_validation.md)
 
 ## Contributing and releasing
 

@@ -30,14 +30,14 @@ provider "techzone" {
 
 ## Token validation
 
-Use the `techzone_token_validation` data source as a plan-time gate to fail fast
+Use the `ibmtechzone_token_validation` data source as a plan-time gate to fail fast
 if the token is expired before any reservation is created:
 
 ```hcl
-data "techzone_token_validation" "check" {}
+data "ibmtechzone_token_validation" "check" {}
 
-resource "techzone_reservation" "this" {
-  depends_on = [data.techzone_token_validation.check]
+resource "ibmtechzone_reservation" "this" {
+  depends_on = [data.ibmtechzone_token_validation.check]
   # ...
 }
 ```
@@ -46,7 +46,7 @@ resource "techzone_reservation" "this" {
 
 | Operation | Behavior on expired token |
 |-----------|--------------------------|
-| `terraform plan` | Fails fast if `techzone_token_validation` data source is present |
+| `terraform plan` | Fails fast if `ibmtechzone_token_validation` data source is present |
 | `terraform apply` (Create) | Returns error — reservation is not created |
 | `terraform apply` (Read) | Silently skips refresh — state is preserved |
 | `terraform destroy` (Delete) | Returns actionable error; state is preserved so retry is possible after token refresh |

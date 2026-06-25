@@ -17,7 +17,7 @@ import (
 
 // testAccProtoV6ProviderFactories is shared by tests that don't need a custom server.
 var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
-	"techzone": providerserver.NewProtocol6WithError(provider.New("test")()),
+	"ibmtechzone": providerserver.NewProtocol6WithError(provider.New("test")()),
 }
 
 // providerFactoriesFor returns a provider factory wired to the given base URL
@@ -27,7 +27,7 @@ func providerFactoriesFor(_ string, _ string) map[string]func() (tfprotov6.Provi
 	// injection at the factory level — the provider reads config from the HCL block.
 	// We return the same standard factory; the HCL config block carries the URL/key.
 	return map[string]func() (tfprotov6.ProviderServer, error){
-		"techzone": providerserver.NewProtocol6WithError(provider.New("test")()),
+		"ibmtechzone": providerserver.NewProtocol6WithError(provider.New("test")()),
 	}
 }
 
@@ -47,10 +47,10 @@ func assertNoTokenLeak(t *testing.T, msg string) {
 // HCL config helpers
 // ---------------------------------------------------------------------------
 
-// providerConfigHCL builds a provider "techzone" {} block for test steps.
+// providerConfigHCL builds a provider "ibmtechzone" {} block for test steps.
 func providerConfigHCL(apiBase, apiKey string) string {
 	return fmt.Sprintf(`
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = %q
   api_base = %q
 }`, apiKey, apiBase)
@@ -67,7 +67,7 @@ provider "techzone" {
 // the client set by Configure).
 func withProbeDS() string {
 	return `
-data "techzone_token_validation" "probe" {}`
+data "ibmtechzone_token_validation" "probe" {}`
 }
 
 // ---------------------------------------------------------------------------
@@ -78,10 +78,10 @@ func TestProvider_schema(t *testing.T) {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			{
-				// An empty provider block is valid; api_key defaults to env fallback.
-				Config: `provider "techzone" {}`,
-			},
+		{
+			// An empty provider block is valid; api_key defaults to env fallback.
+			Config: `provider "ibmtechzone" {}`,
+		},
 		},
 	})
 }
@@ -98,7 +98,7 @@ func TestProvider_Schema_AcceptsAPIKeyAndAPIBase(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: `
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = "some-token"
   api_base = "https://api.techzone.ibm.com"
 }`,
@@ -118,7 +118,7 @@ func TestProvider_ValidateConfig_ValidHTTPSBase(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: `
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = "some-token"
   api_base = "https://api.techzone.ibm.com"
 }`,
@@ -134,7 +134,7 @@ func TestProvider_ValidateConfig_LoopbackHTTPBase(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: `
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = "some-token"
   api_base = "http://127.0.0.1:8765"
 }`,
@@ -145,7 +145,7 @@ provider "techzone" {
 
 // TestProvider_ValidateConfig_NonHTTPSNonLoopback: http://evil.com → diagnostic error.
 //
-// The data "techzone_token_validation" block is required to force Terraform to
+// The data "ibmtechzone_token_validation" block is required to force Terraform to
 // dispatch ValidateProviderConfig/ConfigureProvider RPCs — a config containing
 // only a provider block produces "No changes" and the provider lifecycle is never
 // invoked (Terraform CLI 1.15+ behaviour).
@@ -155,11 +155,11 @@ func TestProvider_ValidateConfig_NonHTTPSNonLoopback(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: `
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = "some-token"
   api_base = "http://evil.com"
 }
-data "techzone_token_validation" "probe" {}`,
+data "ibmtechzone_token_validation" "probe" {}`,
 				// ValidateConfig MUST emit a diagnostic for this base.
 				ExpectError: regexp.MustCompile(`(?i)(https|insecure|loopback|api_base|must use https)`),
 			},
@@ -172,7 +172,7 @@ data "techzone_token_validation" "probe" {}`,
 // ---------------------------------------------------------------------------
 
 // TestProvider_Configure_ValidToken: 200 + JSON body → Configure succeeds (no error)
-// and the techzone_token_validation data source exposes status = "valid".
+// and the ibmtechzone_token_validation data source exposes status = "valid".
 //
 // withProbeDS() forces ConfigureProvider RPCs to run (Shin F-8).
 // TestCheckResourceAttr on "status" pins that the probe result flowed through
@@ -205,7 +205,7 @@ func TestProvider_Configure_ValidToken(t *testing.T) {
 					// (3) providerData was threaded through to the data source correctly,
 					// (4) the data source's Read set the output. (N-1 fix)
 					resource.TestCheckResourceAttr(
-						"data.techzone_token_validation.probe", "status", "valid",
+						"data.ibmtechzone_token_validation.probe", "status", "valid",
 					),
 				),
 			},
@@ -218,7 +218,7 @@ func TestProvider_Configure_ValidToken(t *testing.T) {
 //
 // When the token probe returns 401, Configure MUST NOT call AddError — it stores
 // TokenErr in providerData and returns cleanly. The diagnostic only surfaces when
-// a resource or data source that is load-bearing (Create, techzone_token_validation)
+// a resource or data source that is load-bearing (Create, ibmtechzone_token_validation)
 // reads TokenErr and calls AddError itself.
 //
 // This test uses a provider-only config (NO data source, NO resource) with a 401-

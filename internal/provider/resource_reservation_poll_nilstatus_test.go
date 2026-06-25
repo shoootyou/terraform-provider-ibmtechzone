@@ -92,8 +92,8 @@ func TestAccReservation_PollWithNilStatus_RetriesAndSucceeds(t *testing.T) {
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					// Create must succeed despite the first poll returning nil status.
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
 				),
 			},
 		},
@@ -133,8 +133,8 @@ func TestAccReservation_PollNullStatusField_RetriesAndSucceeds(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
 				),
 			},
 		},

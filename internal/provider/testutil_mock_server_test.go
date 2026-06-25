@@ -512,17 +512,17 @@ func (m *mockTechZoneServer) handleDelete(w http.ResponseWriter, r *http.Request
 // ---------------------------------------------------------------------------
 
 // reservationConfig returns a complete Terraform config for a
-// techzone_reservation resource, using the given mock server URL and api_key.
+// ibmtechzone_reservation resource, using the given mock server URL and api_key.
 //
 // E5 update: hcp_org / hcp_project removed from schema; replaced by dynamic_outputs map.
 func reservationConfig(mockURL, apiKey string) string {
 	return fmt.Sprintf(`
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = %q
   api_base = %q
 }
 
-resource "techzone_reservation" "test" {
+resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
   dynamic_outputs           = {
@@ -541,12 +541,12 @@ resource "techzone_reservation" "test" {
 // E5 update: hcp_org / hcp_project removed; replaced by dynamic_outputs map.
 func reservationConfigWithTimeout(mockURL, apiKey string, timeoutMinutes int) string {
 	return fmt.Sprintf(`
-provider "techzone" {
+provider "ibmtechzone" {
   api_key  = %q
   api_base = %q
 }
 
-resource "techzone_reservation" "test" {
+resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
   dynamic_outputs           = {

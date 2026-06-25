@@ -61,9 +61,9 @@ func TestAccReservation_InPlaceUpdateOperational(t *testing.T) {
 			{
 				Config: reservationConfigWithTimeout(mock.URL(), sentinelToken, 1),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "timeout_minutes", "1"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "timeout_minutes", "1"),
 				),
 			},
 			// Step 2: Change ONLY timeout_minutes from 1 to 2.
@@ -74,14 +74,14 @@ func TestAccReservation_InPlaceUpdateOperational(t *testing.T) {
 				Config: reservationConfigWithTimeout(mock.URL(), sentinelToken, 2),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					// id must be stable — no replacement.
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 					// status must be preserved from state — no refresh, no API call.
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
 					// timeout_minutes must reflect the new value.
-					resource.TestCheckResourceAttr("techzone_reservation.test", "timeout_minutes", "2"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "timeout_minutes", "2"),
 					// start_date and end_date must be stable (not "(known after apply)").
-					resource.TestCheckResourceAttrSet("techzone_reservation.test", "start_date"),
-					resource.TestCheckResourceAttrSet("techzone_reservation.test", "end_date"),
+					resource.TestCheckResourceAttrSet("ibmtechzone_reservation.test", "start_date"),
+					resource.TestCheckResourceAttrSet("ibmtechzone_reservation.test", "end_date"),
 				),
 			},
 		},
@@ -122,7 +122,7 @@ func TestAccReservation_AdvisoryProbe_DoesNotBlockWorkingDelete(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 			// Step 2: Explicit destroy. Configure probe sees 401, but DELETE returns 200.
@@ -173,7 +173,7 @@ func TestAccReservation_Delete_Success_Codes(t *testing.T) {
 					{
 						Config: reservationConfig(mock.URL(), sentinelToken),
 						Check: resource.ComposeAggregateTestCheckFunc(
-							resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+							resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 						),
 					},
 				},
@@ -207,7 +207,7 @@ func TestAccReservation_ReadExpiredStatusPrune(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 			// Step 2: Switch to "expired" canonical read → provider prunes → non-empty plan.
@@ -243,7 +243,7 @@ func TestAccReservation_DeleteBodyShape(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 		},

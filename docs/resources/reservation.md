@@ -1,4 +1,4 @@
-# techzone_reservation (Resource)
+# ibmtechzone_reservation (Resource)
 
 Manages an IBM TechZone AWS account reservation. The provider fetches the
 collection to derive the platform/region/template fields, submits a reservation
@@ -13,10 +13,10 @@ failure so the operator can refresh their token and retry without re-importing.
 ## Example Usage
 
 ```hcl
-data "techzone_token_validation" "check" {}
+data "ibmtechzone_token_validation" "check" {}
 
-resource "techzone_reservation" "example" {
-  depends_on = [data.techzone_token_validation.check]
+resource "ibmtechzone_reservation" "example" {
+  depends_on = [data.ibmtechzone_token_validation.check]
 
   collection_id = "5f43a1b2c3d4e5f6a7b8c9d0"
   user_email    = "user@example.com"
@@ -38,7 +38,7 @@ resource "techzone_reservation" "example" {
 
 output "aws_console_url" {
   value = one([
-    for l in techzone_reservation.example.service_links : l.url
+    for l in ibmtechzone_reservation.example.service_links : l.url
     if l.type == "AWS Console"
   ])
 }
@@ -119,7 +119,7 @@ In addition to all arguments above, the following computed attributes are export
 Reservations can be imported using the TechZone reservation ID:
 
 ```sh
-terraform import techzone_reservation.example <reservation-id>
+terraform import ibmtechzone_reservation.example <reservation-id>
 ```
 
 ~> **Note** Importing a reservation only populates the `id` field. A subsequent

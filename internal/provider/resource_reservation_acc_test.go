@@ -32,7 +32,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestAccReservation_CreateReadDelete verifies the full lifecycle of a
-// techzone_reservation resource against the mock server:
+// ibmtechzone_reservation resource against the mock server:
 //   - Create: POST succeeds, poll reaches Ready, canonical GET populates state.
 //   - Plan: a second plan shows no diff (idempotent read).
 //   - Destroy: DELETE succeeds.
@@ -47,16 +47,16 @@ func TestAccReservation_CreateReadDelete(t *testing.T) {
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					// id must be the value returned by the mock POST response.
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 					// status must be "Ready" from the canonical GET response.
-					resource.TestCheckResourceAttr("techzone_reservation.test", "status", "Ready"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "status", "Ready"),
 					// service_links must be non-empty (the mock returns one link).
-					resource.TestCheckResourceAttr("techzone_reservation.test", "service_links.#", "1"),
-					resource.TestCheckResourceAttr("techzone_reservation.test", "service_links.0.type", "AWS Console"),
-					resource.TestCheckResourceAttrSet("techzone_reservation.test", "service_links.0.url"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "service_links.#", "1"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "service_links.0.type", "AWS Console"),
+					resource.TestCheckResourceAttrSet("ibmtechzone_reservation.test", "service_links.0.url"),
 					// start_date and end_date must be populated from provisionDate / provisionUntil.
-					resource.TestCheckResourceAttrSet("techzone_reservation.test", "start_date"),
-					resource.TestCheckResourceAttrSet("techzone_reservation.test", "end_date"),
+					resource.TestCheckResourceAttrSet("ibmtechzone_reservation.test", "start_date"),
+					resource.TestCheckResourceAttrSet("ibmtechzone_reservation.test", "end_date"),
 				),
 			},
 			// Second step: re-apply the same config. The refresh (Read) must return the
@@ -139,7 +139,7 @@ func TestAccReservation_Read404Prune(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 			// Step 2: Switch to 404 mode and refresh. ResourceRead sees 404 →
@@ -178,7 +178,7 @@ func TestAccReservation_ReadDeletedPrune(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 			// Step 2: Switch to "deleted" mode; refresh → provider prunes → non-empty plan.
@@ -212,7 +212,7 @@ func TestAccReservation_ReadPastProvisionUntilPrune(t *testing.T) {
 			{
 				Config: reservationConfig(mock.URL(), sentinelToken),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+					resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 				),
 			},
 			// Step 2: Switch to "past_expiry" mode; refresh → provider prunes → non-empty plan.
@@ -249,7 +249,7 @@ func TestAccReservation_DeleteIdempotent(t *testing.T) {
 					{
 						Config: reservationConfig(mock.URL(), sentinelToken),
 						Check: resource.ComposeAggregateTestCheckFunc(
-							resource.TestCheckResourceAttr("techzone_reservation.test", "id", "test-reservation-id"),
+							resource.TestCheckResourceAttr("ibmtechzone_reservation.test", "id", "test-reservation-id"),
 						),
 					},
 				},
@@ -291,7 +291,7 @@ func TestAccTokenValidation_ExpiredToken(t *testing.T) {
 				// Use a data source block to force Configure to run (TF CLI 1.15+ skips
 				// Configure for provider-only configs).
 				Config: providerConfigHCL(mock.URL(), sentinelToken) + `
-data "techzone_token_validation" "probe" {}`,
+data "ibmtechzone_token_validation" "probe" {}`,
 				// Must error with the actionable "invalid or expired" message.
 				ExpectError: regexp.MustCompile(`(?i)(invalid|expired|refresh|TECHZONE_API_KEY)`),
 			},

@@ -16,7 +16,7 @@ import (
 // Ensure reservationDataSource satisfies the datasource.DataSource interface.
 var _ datasource.DataSource = &reservationDataSource{}
 
-// reservationDataSource implements the techzone_reservation data source
+// reservationDataSource implements the ibmtechzone_reservation data source
 // (read-only lookup by ID — no prune, no lifecycle management).
 type reservationDataSource struct {
 	pd *providerData

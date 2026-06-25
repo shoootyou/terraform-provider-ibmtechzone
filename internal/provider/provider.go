@@ -50,7 +50,7 @@ type providerModel struct {
 //   - Create and Read are load-bearing: they AddError if TokenErr != nil.
 //   - Delete MUST succeed even when the token is expired (RFC §3.3 / §4 M1);
 //     it ignores TokenErr entirely.
-//   - The techzone_token_validation data source Read surfaces TokenErr as an
+//   - The ibmtechzone_token_validation data source Read surfaces TokenErr as an
 //     AddError so it can act as a plan-time gate.
 //   - TokenErrIsConnectivity distinguishes a network/transport failure from a
 //     token-invalid failure so callers can emit the right diagnostic summary.
@@ -70,7 +70,7 @@ func New(version string) func() provider.Provider {
 
 // Metadata sets the provider type name and version.
 func (p *Provider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
-	resp.TypeName = "techzone"
+	resp.TypeName = "ibmtechzone"
 	resp.Version = p.version
 }
 
@@ -81,7 +81,7 @@ func (p *Provider) Metadata(_ context.Context, _ provider.MetadataRequest, resp 
 func (p *Provider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Provider for IBM TechZone reservations. " +
-			"Manages techzone_reservation resources, which provision temporary " +
+			"Manages ibmtechzone_reservation resources, which provision temporary " +
 			"AWS cloud accounts from the TechZone pool.",
 		Attributes: map[string]schema.Attribute{
 			"api_key": schema.StringAttribute{

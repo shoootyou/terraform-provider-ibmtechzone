@@ -40,13 +40,13 @@ var _ resource.ResourceWithImportState = &reservationResource{}
 // Types
 // ---------------------------------------------------------------------------
 
-// reservationResource implements the techzone_reservation managed resource.
+// reservationResource implements the ibmtechzone_reservation managed resource.
 type reservationResource struct {
 	pd  *providerData
 	now func() time.Time // injectable clock; defaults to time.Now (audit fix H3)
 }
 
-// reservationModel is the Terraform state model for techzone_reservation.
+// reservationModel is the Terraform state model for ibmtechzone_reservation.
 type reservationModel struct {
 	// Identity inputs (RequiresReplace)
 	DynamicOutputs   types.Map    `tfsdk:"dynamic_outputs"`
