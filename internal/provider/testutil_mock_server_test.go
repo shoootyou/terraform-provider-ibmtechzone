@@ -69,6 +69,11 @@ type mockTechZoneServer struct {
 	// When nil (default), handlePoll uses the readyAfterPollCount/pollShouldFail logic.
 	pollResponseSequence []string
 
+	// pollDone: set to true once the poll loop has received a terminal status
+	// (Ready, Failed, or a non-retrying sequence end). After this, GET /api/reservation/aws/<id>
+	// calls are canonical Reads (not polls) and must go to handleCanonicalRead.
+	pollDone bool
+
 	// --- Canonical read (GET /api/reservation/aws/<id>) ---
 
 	// canonicalReadMode controls what GET /api/reservation/aws/<id> returns:
@@ -439,32 +444,60 @@ func (m *mockTechZoneServer) handlePoll(w http.ResponseWriter, r *http.Request) 
 
 // handleCanonicalReadOrAwsPoll — GET /api/reservation/aws/<id>
 //
-// This handler serves both:
-//   (a) the canonical Read after create is complete (existing behaviour), and
-//   (b) poll requests from the FIXED provider code, which routes
-//       the poll loop to /api/reservation/aws/<id> instead of the legacy
-//       /api/reservation/<id>.
+// This handler serves two roles:
+//   (a) poll requests from the provider's poll loop (the fixed endpoint —
+//       /api/reservation/aws/<id> has no legacy 302 redirect), and
+//   (b) the canonical Read after polling completes (Terraform Read/Destroy calls).
 //
-// When awsPollResponseSequence is non-nil, it uses sequence-based responses for
-// the poll path (to allow "Provisioning" → "Ready" progression in the fixed code).
-// When awsPollResponseSequence is nil (default), it delegates to handleCanonicalRead
-// — which defaults to "ready" mode, so the fixed poll loop exits immediately.
+// Dispatch priority:
+//  1. pollDone == true → poll finished; this is a canonical Read — delegate to handleCanonicalRead.
+//  2. awsPollResponseSequence set → explicit per-aws-endpoint sequence (overrides all poll logic).
+//  3. pollResponseSequence set → shared poll sequence (exercises nil-status retry path).
+//  4. pollShouldFail / readyAfterPollCount set → standard Provisioning→Failed/Ready progression.
+//  5. None of the above → fast-path: return Ready immediately (no poll scenario configured).
+//
+// pollDone is set once a terminal poll body is dispatched (Ready, Failed, or exhausted sequence).
+// After that, all /aws/<id> requests are canonical Reads.
+//
+// Rules (3) and (4) share pollCount with handlePoll so existing tests that configure
+// readyAfterPollCount / pollShouldFail / pollResponseSequence work without change after
+// the poll loop was moved from /api/reservation/<id> to /api/reservation/aws/<id>.
 func (m *mockTechZoneServer) handleCanonicalReadOrAwsPoll(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
-	seq := m.awsPollResponseSequence
-	count := m.awsPollCount
-	if seq != nil {
+
+	// (1) Once polling is done, all /aws/<id> calls are canonical Reads.
+	if m.pollDone {
+		m.mu.Unlock()
+		m.handleCanonicalRead(w, r)
+		return
+	}
+
+	awsSeq := m.awsPollResponseSequence
+	awsCount := m.awsPollCount
+	if awsSeq != nil {
 		m.awsPollCount++
+	}
+
+	pollSeq := m.pollResponseSequence
+	pollCount := m.pollCount
+	readyAfter := m.readyAfterPollCount
+	fail := m.pollShouldFail
+
+	// Increment pollCount for non-awsSeq paths so readyAfterPollCount and
+	// pollResponseSequence behave identically to when handlePoll served the request.
+	usePollLogic := awsSeq == nil && (pollSeq != nil || fail || readyAfter > 0)
+	if usePollLogic {
+		m.pollCount++
 	}
 	m.mu.Unlock()
 
-	if seq != nil {
-		// Sequence-based: serve awsPollResponseSequence for the nth call.
-		idx := count
-		if idx >= len(seq) {
-			idx = len(seq) - 1
+	// (2) awsPollResponseSequence: explicit per-aws-endpoint sequence.
+	if awsSeq != nil {
+		idx := awsCount
+		if idx >= len(awsSeq) {
+			idx = len(awsSeq) - 1
 		}
-		body := seq[idx]
+		body := awsSeq[idx]
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if body == "" {
@@ -472,10 +505,64 @@ func (m *mockTechZoneServer) handleCanonicalReadOrAwsPoll(w http.ResponseWriter,
 		} else {
 			fmt.Fprint(w, body)
 		}
+		// Mark poll done when the sequence is exhausted or returns a terminal status.
+		// For simplicity: mark done after any non-empty body (caller controls the sequence).
+		if body != "" && body != `{"status":"Provisioning"}` {
+			m.mu.Lock()
+			m.pollDone = true
+			m.mu.Unlock()
+		}
 		return
 	}
 
-	// Default: delegate to the canonical read handler (existing behaviour).
+	// (3) pollResponseSequence: shared sequence (nil-status retry tests).
+	if pollSeq != nil {
+		idx := pollCount
+		if idx >= len(pollSeq) {
+			idx = len(pollSeq) - 1
+		}
+		body := pollSeq[idx]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if body == "" {
+			fmt.Fprint(w, `{}`)
+		} else {
+			fmt.Fprint(w, body)
+			// Terminal body dispatched: subsequent /aws/<id> calls are canonical Reads.
+			if body != `{"status":"Provisioning"}` {
+				m.mu.Lock()
+				m.pollDone = true
+				m.mu.Unlock()
+			}
+		}
+		return
+	}
+
+	// (4) pollShouldFail / readyAfterPollCount: standard Provisioning→Failed/Ready progression.
+	if fail || readyAfter > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if pollCount < readyAfter {
+			fmt.Fprint(w, `{"status":"Provisioning"}`)
+			return
+		}
+		// Terminal status: mark poll done before returning.
+		m.mu.Lock()
+		m.pollDone = true
+		m.mu.Unlock()
+		if fail {
+			fmt.Fprint(w, `{"status":"Failed"}`)
+			return
+		}
+		fmt.Fprint(w, `{"status":"Ready"}`)
+		return
+	}
+
+	// (5) Default: no poll scenario configured — return Ready immediately and
+	// mark poll done so subsequent canonical Reads go to handleCanonicalRead.
+	m.mu.Lock()
+	m.pollDone = true
+	m.mu.Unlock()
 	m.handleCanonicalRead(w, r)
 }
 

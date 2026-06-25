@@ -486,9 +486,11 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 			}
 		}
 
-		// Poll path: /api/reservation/<id> (status-only; no "aws/" prefix).
-		// The canonical read at /api/reservation/aws/<id> is used only after Ready.
-		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/"+reservationID)
+		// Poll path: /api/reservation/aws/<id> — returns status directly (no redirect).
+		// The legacy /api/reservation/<id> returns HTTP 302, which the client sees raw
+		// (redirect-following is disabled for SSO-token-expiry detection) and treats as
+		// non-2xx, causing the poll loop to retry forever. Use the typed endpoint instead.
+		pollStatus, pollBody, pollErr := r.pd.Client.DoGet(ctx, "/api/reservation/aws/"+reservationID)
 		if pollErr != nil {
 			tflog.Warn(ctx, "Poll connectivity error, retrying", map[string]any{
 				"reservation_id": reservationID,
