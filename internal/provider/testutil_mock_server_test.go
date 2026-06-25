@@ -103,12 +103,42 @@ type mockTechZoneServer struct {
 	//   "redirect"— 302
 	tokenValidateMode string
 
+	// --- Poll legacy path override (GET /api/reservation/<id>) ---
+
+	// pollLegacyMode controls the response for GET /api/reservation/<id>
+	// (the legacy poll path, distinct from /api/reservation/aws/<id>):
+	//   ""             — normal behaviour: use readyAfterPollCount / pollShouldFail / pollResponseSequence (default)
+	//   "302_redirect" — always return HTTP 302 with Location: /api/reservation/unknown/<id>,
+	//                    mimicking the real TechZone API that permanently redirects the legacy
+	//                    endpoint to an "unknown" path. The provider's HTTP client does NOT
+	//                    follow redirects (CheckRedirect = ErrUseLastResponse), so it receives
+	//                    the 302 raw. The poll loop treats non-2xx as "retry", looping forever.
+	//                    This mode drives TestAccReservation_Poll_LegacyEndpointReturns302_MustNotHang.
+	pollLegacyMode string
+
+	// --- Typed poll path (GET /api/reservation/aws/<id>) — poll sequence ---
+
+	// awsPollResponseSequence is a parallel sequence used when pollLegacyMode is
+	// set to "302_redirect" and the fix routes polls to /api/reservation/aws/<id>.
+	// The nth GET /api/reservation/aws/<id> (0-indexed) returns awsPollResponseSequence[n].
+	// When the index exceeds the slice, the last element is repeated.
+	// Empty string "" → `{}` (nil-status); non-empty → verbatim JSON.
+	// When nil AND pollLegacyMode=="302_redirect", the canonical handleCanonicalRead
+	// handler services /aws/<id> — which defaults to "ready" mode.
+	awsPollResponseSequence []string
+	awsPollCount            int // tracks GET /api/reservation/aws/<id> calls
+
 	// --- Request recording (for assertions) ---
 
 	// DeleteBodies stores the raw request bodies of each DELETE call.
 	DeleteBodies [][]byte
 	// AuthHeaders stores the raw Authorization header value from each request.
 	AuthHeaders []string
+	// PollURLLog records the URL path of every GET that hits either the legacy
+	// poll path (/api/reservation/<id>) or the typed poll path
+	// (/api/reservation/aws/<id>).  Used to assert which endpoint the poll
+	// loop actually used.
+	PollURLLog []string
 }
 
 // mockCollectionResponse holds the canned HTTP response for a collection ID.
@@ -226,6 +256,13 @@ func (m *mockTechZoneServer) Close() {
 func (m *mockTechZoneServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	m.AuthHeaders = append(m.AuthHeaders, r.Header.Get("Authorization"))
+	// Record GET paths for both poll endpoints so tests can assert which one was used.
+	if r.Method == http.MethodGet &&
+		(strings.HasPrefix(r.URL.Path, "/api/reservation/aws/") ||
+			(strings.HasPrefix(r.URL.Path, "/api/reservation/") &&
+				!strings.HasPrefix(r.URL.Path, "/api/reservation/aws"))) {
+		m.PollURLLog = append(m.PollURLLog, r.URL.Path)
+	}
 	m.mu.Unlock()
 
 	switch {
@@ -241,7 +278,7 @@ func (m *mockTechZoneServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m.handleCreate(w, r)
 
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/reservation/aws/"):
-		m.handleCanonicalRead(w, r)
+		m.handleCanonicalReadOrAwsPoll(w, r)
 
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/reservation/"):
 		m.handlePoll(w, r)
@@ -334,15 +371,38 @@ func (m *mockTechZoneServer) handleCreate(w http.ResponseWriter, r *http.Request
 	fmt.Fprint(w, `{"id":"test-reservation-id"}`)
 }
 
-// handlePoll — GET /api/reservation/<id>  (status poll, not the aws/<id> path)
-func (m *mockTechZoneServer) handlePoll(w http.ResponseWriter, _ *http.Request) {
+// handlePoll — GET /api/reservation/<id>  (legacy status poll, not the aws/<id> path)
+//
+// When pollLegacyMode == "302_redirect", this handler mimics the real TechZone API
+// behaviour: the legacy /api/reservation/<id> endpoint PERMANENTLY redirects to
+// /api/reservation/unknown/<id>. The provider's HTTP client does not follow redirects
+// (CheckRedirect = ErrUseLastResponse), so it receives the 302 raw.  The poll loop
+// then sees a non-2xx status and retries — forever, because the redirect is permanent.
+//
+// This mode is set by TestAccReservation_Poll_LegacyEndpointReturns302_MustNotHang to
+// drive the regression test (RED gate): the bug in the current code.
+func (m *mockTechZoneServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
+	legacyMode := m.pollLegacyMode
 	count := m.pollCount
 	m.pollCount++
 	readyAfter := m.readyAfterPollCount
 	fail := m.pollShouldFail
 	seq := m.pollResponseSequence
 	m.mu.Unlock()
+
+	// 302-redirect mode: always redirect the legacy endpoint to unknown/<id>.
+	// This is the exact behaviour of the real TechZone API that caused the
+	// production hang (root cause from terraform apply log).
+	if legacyMode == "302_redirect" {
+		// Extract the reservation ID from the path: /api/reservation/<id>
+		id := strings.TrimPrefix(r.URL.Path, "/api/reservation/")
+		w.Header().Set("Location", "/api/reservation/unknown/"+id)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusFound) // 302
+		fmt.Fprintf(w, "<html><body>Found. Redirecting to /api/reservation/unknown/%s</body></html>", id)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -375,6 +435,48 @@ func (m *mockTechZoneServer) handlePoll(w http.ResponseWriter, _ *http.Request) 
 		return
 	}
 	fmt.Fprint(w, `{"status":"Ready"}`)
+}
+
+// handleCanonicalReadOrAwsPoll — GET /api/reservation/aws/<id>
+//
+// This handler serves both:
+//   (a) the canonical Read after create is complete (existing behaviour), and
+//   (b) poll requests from the FIXED provider code, which routes
+//       the poll loop to /api/reservation/aws/<id> instead of the legacy
+//       /api/reservation/<id>.
+//
+// When awsPollResponseSequence is non-nil, it uses sequence-based responses for
+// the poll path (to allow "Provisioning" → "Ready" progression in the fixed code).
+// When awsPollResponseSequence is nil (default), it delegates to handleCanonicalRead
+// — which defaults to "ready" mode, so the fixed poll loop exits immediately.
+func (m *mockTechZoneServer) handleCanonicalReadOrAwsPoll(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	seq := m.awsPollResponseSequence
+	count := m.awsPollCount
+	if seq != nil {
+		m.awsPollCount++
+	}
+	m.mu.Unlock()
+
+	if seq != nil {
+		// Sequence-based: serve awsPollResponseSequence for the nth call.
+		idx := count
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		body := seq[idx]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if body == "" {
+			fmt.Fprint(w, `{}`)
+		} else {
+			fmt.Fprint(w, body)
+		}
+		return
+	}
+
+	// Default: delegate to the canonical read handler (existing behaviour).
+	m.handleCanonicalRead(w, r)
 }
 
 // canonicalReadyBody is the standard 200+Ready response body with serviceLinks.
