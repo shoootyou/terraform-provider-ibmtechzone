@@ -78,10 +78,12 @@ package provider
 
 import (
 	"context"
-	"regexp"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -169,46 +171,98 @@ func TestReservationSchema_CollectionID_HasHexValidator(t *testing.T) {
 	}
 }
 
-// TestReservationSchema_CollectionID_ValidHexAccepted confirms that a valid 24-char
-// hex string passes the validator's regex pattern.
+// TestReservationSchema_CollectionID_ValidHexPattern verifies the deployed
+// collection_id validator using the schema's actual validator instance.
 //
-// We can't call validators directly from schema inspection, so we test by verifying
-// the regex pattern the validator SHOULD enforce accepts valid IDs.
-// This is a specification test: if the validator is added with the wrong pattern,
-// valid IDs would be rejected at plan time, which would be a regression.
+// Motivation (Ei F-03 / audit remediation): the previous version of this test
+// compiled its own phantom regex (`^[a-fA-F0-9]{24}$`) and tested it in isolation
+// — proving nothing about the deployed validator. If Kou had shipped a typo
+// in the pattern (e.g. `^[a-fA-F0-9]{23}$`), this test would still pass.
+//
+// This version invokes ValidateString on the validator extracted directly from the
+// schema, so it exercises the real deployed code path. A valid 24-hex ID must
+// produce no diagnostics; invalid IDs must produce a non-empty diagnostics set.
+//
+// Aligned with Kou's parallel tightening to ^[a-fA-F0-9]{24}$ (audit remediation
+// batch, 2026-06-25). Test is green once Kou's validator is in place.
 func TestReservationSchema_CollectionID_ValidHexPattern(t *testing.T) {
 	t.Parallel()
 
-	// This is the regex that MUST be used in the validator.
-	hexPattern := regexp.MustCompile(`^[a-fA-F0-9]{24}$`)
+	s := resourceSchemaForDelete(t)
 
+	attr, ok := s.Attributes["collection_id"]
+	if !ok {
+		t.Fatal("FAIL: attribute \"collection_id\" is absent from schema")
+	}
+	strAttr, ok := attr.(rschema.StringAttribute)
+	if !ok {
+		t.Fatalf("FAIL: \"collection_id\" is %T, want rschema.StringAttribute", attr)
+	}
+	if len(strAttr.Validators) == 0 {
+		t.Fatal("FAIL: collection_id has no validators — cannot exercise the pattern")
+	}
+
+	ctx := context.Background()
+	attrPath := path.Root("collection_id")
+
+	// invokeValidators calls all validators on the given string value and
+	// returns true if any diagnostic errors were produced.
+	invokeValidators := func(value string) bool {
+		t.Helper()
+		hasError := false
+		for _, v := range strAttr.Validators {
+			req := validator.StringRequest{
+				Path:        attrPath,
+				ConfigValue: types.StringValue(value),
+			}
+			resp := &validator.StringResponse{}
+			v.ValidateString(ctx, req, resp)
+			if resp.Diagnostics.HasError() {
+				hasError = true
+			}
+		}
+		return hasError
+	}
+
+	// Valid 24-char hex IDs — the deployed validator MUST accept these.
+	// If it erroneously rejects them, valid collection IDs would be blocked at
+	// plan time, which is a regression (Ei F-03 requirement: "valid IDs accepted").
 	validIDs := []string{
-		"69650af0758b9e41de66b6ae",
-		"000000000000000000000001",
-		"AABBCCDDEEFF001122334455",
-		"aabbccddeeff001122334455",
+		"69650af0758b9e41de66b6ae", // realistic MongoDB ObjectID from DDR collection
+		"000000000000000000000001", // all-zeros with one (lower-hex edge)
+		"AABBCCDDEEFF001122334455", // all-uppercase hex
+		"aabbccddeeff001122334455", // all-lowercase hex
 	}
 	for _, id := range validIDs {
-		if !hexPattern.MatchString(id) {
-			t.Errorf("FAIL: valid 24-char hex ID %q should match ^[a-fA-F0-9]{24}$ but does not", id)
+		if invokeValidators(id) {
+			t.Errorf("FAIL: valid 24-hex collection_id %q was REJECTED by the deployed validator — "+
+				"valid IDs must pass plan validation", id)
 		}
 	}
 
+	// Invalid IDs — the deployed validator MUST reject these at plan time.
+	// This is what makes the test meaningful: these were all accepted by the
+	// relaxed pattern (^[a-zA-Z0-9_-]{1,64}$) but MUST be rejected by the
+	// tightened pattern (^[a-fA-F0-9]{24}$).
 	invalidIDs := []struct {
 		id     string
 		reason string
 	}{
 		{"a/b", "contains slash — path injection risk"},
-		{"../foo", "contains dot-dot — path traversal risk"},
-		{"short", "too short"},
+		{"../foo", "path traversal attempt"},
+		{"short", "too short (5 chars, non-hex)"},
 		{"69650af0758b9e41de66b6aexxx", "too long (27 chars)"},
-		{"69650af0758b9e41de66b6ag", "non-hex char 'g'"},
+		{"69650af0758b9e41de66b6ag", "non-hex char 'g' at position 23"},
 		{"", "empty string"},
 		{"?foo=bar", "query string injection"},
+		{"test-collection-id", "accepted by relaxed pattern but not 24-hex"},
+		{"abc", "accepted by relaxed pattern (len=3) but not 24-hex"},
+		{"x", "single char — accepted by relaxed but not 24-hex"},
 	}
 	for _, tc := range invalidIDs {
-		if hexPattern.MatchString(tc.id) {
-			t.Errorf("FAIL: invalid ID %q (%s) should NOT match ^[a-fA-F0-9]{24}$ but does", tc.id, tc.reason)
+		if !invokeValidators(tc.id) {
+			t.Errorf("FAIL: invalid collection_id %q (%s) was ACCEPTED by the deployed validator — "+
+				"must be rejected at plan time by ^[a-fA-F0-9]{24}$", tc.id, tc.reason)
 		}
 	}
 }

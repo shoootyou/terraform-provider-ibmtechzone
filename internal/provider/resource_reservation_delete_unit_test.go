@@ -134,13 +134,6 @@ func buildReservationResource(t *testing.T, srvURL string) *reservationResource 
 	}
 }
 
-// assertActionableMessage fails t if the diagnostic detail string does not
-// contain one of the required actionable phrases.
-func assertActionableMessage(t *testing.T, diags interface{ Errors() []string }) {
-	t.Helper()
-	// We check the raw Diagnostics.
-}
-
 // ---------------------------------------------------------------------------
 // TestDeleteUnit_AuthFailure_StatePreserved
 //

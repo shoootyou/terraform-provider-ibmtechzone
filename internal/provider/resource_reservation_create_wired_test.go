@@ -104,10 +104,13 @@ import (
 // ddrCollectionJSON is a minimal DDR-shaped collection response for the mock server.
 // platforms[0].infrastructure == "aws"; regions[0] has the DDR template fields.
 //
+// Collection ID is a valid 24-hex MongoDB ObjectID to pass schema validation
+// (^[a-fA-F0-9]{24}$). Matches testCollectionID in testutil_mock_server_test.go.
+//
 // NOTE: key order is intentionally non-alphabetical ("oid" before "id") in the
 // platform element to enable byte-verbatim assertion (same technique as payload golden test).
 const ddrCollectionJSON = `{
-  "id": "test-collection-id",
+  "id": "69650af0758b9e41de66b6ae",
   "platforms": [
     {
       "oid": "62ccb18c2d38520017eec9fb",
@@ -135,7 +138,7 @@ const ddrCollectionJSON = `{
 
 // vmwareCollectionJSON triggers ErrUnsupportedInfrastructure.
 const vmwareCollectionJSON = `{
-  "id": "test-collection-id",
+  "id": "69650af0758b9e41de66b6ae",
   "platforms": [
     {
       "id": "vmware-platform-001",
@@ -163,10 +166,11 @@ const vmwareCollectionJSON = `{
 
 // reservationConfigV2 is the E5-era replacement for reservationConfig.
 // It omits template/hcp_org/hcp_project and populates template_variables.
+// collection_id must be a valid 24-hex MongoDB ObjectID to pass schema validation.
 func reservationConfigV2(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
 resource "ibmtechzone_reservation" "test" {
-  collection_id             = "test-collection-id"
+  collection_id             = "69650af0758b9e41de66b6ae"
   user_email                = "test@example.com"
   template_variables        = {
     "_04_hcp_org"     = "test-hcp-org"
@@ -179,10 +183,11 @@ resource "ibmtechzone_reservation" "test" {
 }
 
 // reservationConfigV2_EmptyOutputs uses an empty template_variables map.
+// collection_id must be a valid 24-hex MongoDB ObjectID to pass schema validation.
 func reservationConfigV2_EmptyOutputs(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
 resource "ibmtechzone_reservation" "test" {
-  collection_id             = "test-collection-id"
+  collection_id             = "69650af0758b9e41de66b6ae"
   user_email                = "test@example.com"
   template_variables        = {}
   timeout_minutes           = 1
@@ -198,7 +203,7 @@ resource "ibmtechzone_reservation" "test" {
 // TestReservationCreate_Wired_PostBodyShape verifies the full wired
 // Create path with the updated BuildCreatePayload:
 //
-//  1. Mock serves GET /api/collection/test-collection-id → ddrCollectionJSON
+//  1. Mock serves GET /api/collection/69650af0758b9e41de66b6ae → ddrCollectionJSON
 //  2. Create builds the POST body using platforms[0].Raw (verbatim) + template_variables.
 //  3. Assertions on the captured POST body:
 //     (a) "user" key PRESENT and equal to user_email ("test@example.com").
@@ -215,13 +220,14 @@ resource "ibmtechzone_reservation" "test" {
 // Also RED: user absent from POST body → assertion (a) fails.
 func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 200, ddrCollectionJSON)
 
 	var capturedBody []byte
 	mock.SetCreateBodyCapture(func(body []byte) { capturedBody = body })
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
+		CheckDestroy:             nil,
 		Steps: []resource.TestStep{
 			{
 				Config: reservationConfigV2(mock.URL(), sentinelToken),
@@ -231,7 +237,6 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 				),
 			},
 		},
-			CheckDestroy: nil,
 	})
 
 	// Now assert on the captured POST body.
@@ -333,7 +338,7 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 	assertBodyString(t, got, "region", "us-east-2")
 	assertBodyString(t, got, "datacenter", "")
 	assertBodyString(t, got, "cloudAccount", "ITZ")
-	assertBodyString(t, got, "collectionId", "test-collection-id")
+	assertBodyString(t, got, "collectionId", "69650af0758b9e41de66b6ae")
 
 	// (f) description constant always present.
 	// RED: current payload.go does not emit `description`.
@@ -349,7 +354,7 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 // (Wire payload key "dynamicOutputs" is the TechZone API field name — unchanged.)
 func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 200, ddrCollectionJSON)
 
 	var capturedBody []byte
 	mock.SetCreateBodyCapture(func(body []byte) { capturedBody = body })
@@ -408,10 +413,11 @@ func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 
 // reservationConfigV2_WithRequesterContext returns a TF config that sets
 // requester_context with opportunity + iui, exercising the new schema attribute.
+// collection_id must be a valid 24-hex MongoDB ObjectID to pass schema validation.
 func reservationConfigV2_WithRequesterContext(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
 resource "ibmtechzone_reservation" "test" {
-  collection_id             = "test-collection-id"
+  collection_id             = "69650af0758b9e41de66b6ae"
   user_email                = "test@example.com"
   template_variables        = {
     "_04_hcp_org" = "test-hcp-org"
@@ -439,7 +445,7 @@ resource "ibmtechzone_reservation" "test" {
 //   - Create() does not wire requester_context → opportunity absent from body.
 func TestReservationCreate_Wired_WithRequesterContext(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 200, ddrCollectionJSON)
 
 	var capturedBody []byte
 	mock.SetCreateBodyCapture(func(body []byte) { capturedBody = body })
@@ -505,7 +511,7 @@ func TestReservationCreate_Wired_WithRequesterContext(t *testing.T) {
 // RED: same compile-fail as above.
 func TestReservationCreate_Wired_NoRequesterContext(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 200, ddrCollectionJSON)
 
 	var capturedBody []byte
 	mock.SetCreateBodyCapture(func(body []byte) { capturedBody = body })
@@ -556,7 +562,7 @@ func TestReservationCreate_Wired_NoRequesterContext(t *testing.T) {
 // at all, so even if it compiled the ExpectError would not match.
 func TestReservationCreate_CollectionNotFound_Diagnostic(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 404, `{"error":"not found"}`)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 404, `{"error":"not found"}`)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
@@ -598,7 +604,7 @@ func TestReservationCreate_CollectionNotFound_Diagnostic(t *testing.T) {
 // RED: same compile-fail + Create does not call GetCollection.
 func TestReservationCreate_UnsupportedInfrastructure_Diagnostic(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 200, vmwareCollectionJSON)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 200, vmwareCollectionJSON)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),
@@ -628,7 +634,7 @@ func TestReservationCreate_UnsupportedInfrastructure_Diagnostic(t *testing.T) {
 // schema without diagnostics.
 func TestReservationSchema_V2Config_IsValid(t *testing.T) {
 	mock := newMockServer(t)
-	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
+	mock.SetCollectionResponse("69650af0758b9e41de66b6ae", 200, ddrCollectionJSON)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: providerFactoriesFor(mock.URL(), sentinelToken),

@@ -165,7 +165,12 @@ func TestAccReservation_Poll_LegacyEndpointReturns302_MustNotHang(t *testing.T) 
 			break
 		}
 	}
-	if !awsPollSeen && len(pollLog) > 0 {
+	// Guard is unconditional: the apply step above already asserted status=Ready,
+	// which requires at least one successful poll. An empty pollLog after a green
+	// apply would mean the mock's PollURLLog was never populated — itself a bug.
+	// Making this unconditional removes the vacuous-skip risk: `len(pollLog) > 0`
+	// could silently pass if the log were somehow empty (Shin F-02).
+	if !awsPollSeen {
 		t.Errorf(
 			"FAIL: no poll requests hit /api/reservation/aws/<id> — "+
 				"poll log: %v.\n"+

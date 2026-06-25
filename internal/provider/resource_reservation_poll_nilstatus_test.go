@@ -100,6 +100,13 @@ func TestAccReservation_PollWithNilStatus_RetriesAndSucceeds(t *testing.T) {
 	})
 
 	// Verify that the mock received at least 2 poll calls (nil-status + Ready).
+	//
+	// Dependency note (Shin F-01): `pollCount` is the shared counter incremented by
+	// `usePollLogic` inside `handleCanonicalReadOrAwsPoll` — the same path used by
+	// BOTH the legacy `/api/reservation/<id>` and the typed `/api/reservation/aws/<id>`
+	// endpoints. The field name "pollCount" is semantically "calls through the shared
+	// poll logic" rather than "legacy-endpoint calls". If the mock is ever refactored
+	// to split the two counters, update this assertion to use the aws-specific counter.
 	mock.mu.Lock()
 	pollCount := mock.pollCount
 	mock.mu.Unlock()

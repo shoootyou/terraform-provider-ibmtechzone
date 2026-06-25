@@ -152,15 +152,21 @@ type mockCollectionResponse struct {
 	body       string
 }
 
+// testCollectionID is the canonical collection ID used across all acceptance tests.
+// It must be a valid 24-character hexadecimal string (MongoDB ObjectID format) to
+// pass schema validation (^[a-fA-F0-9]{24}$) at plan time.
+// Value chosen to match the canonical ID already used in payload_golden_test.go.
+const testCollectionID = "69650af0758b9e41de66b6ae"
+
 // ddrCollectionJSONDefault is the default DDR collection response used by
-// newMockServer to pre-seed "test-collection-id" so that all existing
+// newMockServer to pre-seed testCollectionID so that all existing
 // acceptance tests (which use reservationConfig / reservationConfigWithTimeout)
 // get a valid AWS collection without requiring per-test SetCollectionResponse calls.
 //
 // The canonical definition of this fixture lives in resource_reservation_create_wired_test.go
 // (ddrCollectionJSON); this copy keeps the mock server self-contained.
 const ddrCollectionJSONDefault = `{
-  "id": "test-collection-id",
+  "id": "69650af0758b9e41de66b6ae",
   "platforms": [
     {
       "oid": "62ccb18c2d38520017eec9fb",
@@ -189,7 +195,7 @@ const ddrCollectionJSONDefault = `{
 // newMockServer creates and starts a new mockTechZoneServer.
 // The server is automatically closed when the test ends.
 //
-// The mock is pre-seeded with a DDR AWS collection response for "test-collection-id"
+// The mock is pre-seeded with a DDR AWS collection response for testCollectionID
 // so that all tests using reservationConfig / reservationConfigWithTimeout get a
 // valid collection without requiring explicit SetCollectionResponse calls.
 func newMockServer(t *testing.T) *mockTechZoneServer {
@@ -200,7 +206,7 @@ func newMockServer(t *testing.T) *mockTechZoneServer {
 		tokenValidateMode:    "valid",
 		deleteStatusSequence: []int{200},
 		collectionResponses: map[string]mockCollectionResponse{
-			"test-collection-id": {
+			testCollectionID: {
 				statusCode: 200,
 				body:       ddrCollectionJSONDefault,
 			},
@@ -712,7 +718,7 @@ provider "ibmtechzone" {
 }
 
 resource "ibmtechzone_reservation" "test" {
-  collection_id             = "test-collection-id"
+  collection_id             = "69650af0758b9e41de66b6ae"
   user_email                = "test@example.com"
   template_variables        = {
     "_04_hcp_org"     = "test-hcp-org"
@@ -736,7 +742,7 @@ provider "ibmtechzone" {
 }
 
 resource "ibmtechzone_reservation" "test" {
-  collection_id             = "test-collection-id"
+  collection_id             = "69650af0758b9e41de66b6ae"
   user_email                = "test@example.com"
   template_variables        = {
     "_04_hcp_org"     = "test-hcp-org"

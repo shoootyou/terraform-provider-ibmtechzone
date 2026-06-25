@@ -85,6 +85,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
@@ -191,40 +192,51 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 		assertStringField(t, got, "name", "golden-ddr")
 		assertStringField(t, got, "purpose", "Demo")
 
-		// --- D: platform — RAW BYTE-IDENTITY (audit remediation item 7) ---
+		// --- D: platform — KEY-SCOPED RAW BYTE-IDENTITY (audit remediation item 7,
+		//         Sho-core round-1 finding #1 tightening) ---
 		//
-		// TIGHTENED ASSERTION: We compare the raw JSON bytes of the "platform" value
-		// directly against canonicalPlatformRaw, WITHOUT any unmarshal-remarshal cycle.
+		// TIGHTENED ASSERTION: we locate the `"platform":` key in the raw output bytes
+		// and compare the bytes of that specific value against canonicalPlatformRaw.
+		// This is key-scoped — bytes.Contains(gotBytes, raw) could pass if the same
+		// bytes appeared under a different key or were duplicated elsewhere, which would
+		// be a false-green (Sho-core finding #1).
 		//
-		// Previous implementation (WRONG): both sides went through json.Unmarshal →
-		// map[string]any → json.Marshal, which normalized key order alphabetically on
-		// BOTH sides — masking the reorder regression this test is supposed to catch.
-		// (Sho-core finding #1, Shin audit F-04)
-		//
-		// Correct implementation: extract the raw "platform" bytes from the outer JSON
-		// payload bytes using bytes.Index, then compare directly against canonicalPlatformRaw.
+		// Extraction approach: find `"platform":` in gotBytes, advance past optional
+		// whitespace, then verify the following bytes match canonicalPlatformRaw exactly.
 		//
 		// KEY ORDER CONTRACT: canonicalPlatformRaw has "oid" before "id" (non-alphabetical).
 		// If BuildCreatePayload decoded platformRaw into map[string]any and re-encoded,
 		// encoding/json would sort keys to "id" before "oid". The raw-byte comparison
-		// detects this regression immediately — the bytes would NOT match because the
-		// re-encoded form has alphabetical order.
-		//
-		// The assertion uses bytes.Contains(gotBytes, canonicalPlatformRaw) rather than
-		// extracting and comparing the full sub-JSON, which is simpler and equally precise:
-		// the canonical raw bytes must appear verbatim as a subsequence in the output.
-		if !bytes.Contains(gotBytes, []byte(canonicalPlatformRaw)) {
-			t.Errorf(
-				"FAIL: platform bytes are NOT verbatim in the output payload\n"+
-					"  canonicalPlatformRaw (non-alphabetical key order, 'oid' before 'id') "+
-					"must appear byte-for-byte in the marshalled payload.\n"+
-					"  If BuildCreatePayload round-tripped platformRaw through map[string]any,\n"+
-					"  encoding/json would have alphabetized the keys, making 'id' appear before 'oid'.\n"+
-					"  This assertion catches that regression.\n"+
-					"  want (canonical raw): %s\n"+
-					"  got (full output):    %s",
-				canonicalPlatformRaw, gotBytes,
-			)
+		// detects this regression immediately.
+		platformKeyBytes := []byte(`"platform":`)
+		platformKeyIdx := bytes.Index(gotBytes, platformKeyBytes)
+		if platformKeyIdx < 0 {
+			t.Fatal("FAIL: `\"platform\":` key not found in output payload")
+		} else {
+			// Advance past `"platform":` and any optional whitespace.
+			valueStart := platformKeyIdx + len(platformKeyBytes)
+			for valueStart < len(gotBytes) && (gotBytes[valueStart] == ' ' || gotBytes[valueStart] == '\t' || gotBytes[valueStart] == '\n') {
+				valueStart++
+			}
+			// The platform value must start exactly at canonicalPlatformRaw bytes.
+			want := []byte(canonicalPlatformRaw)
+			if valueStart+len(want) > len(gotBytes) || !bytes.Equal(gotBytes[valueStart:valueStart+len(want)], want) {
+				var gotSlice []byte
+				end := valueStart + len(want)
+				if end > len(gotBytes) {
+					end = len(gotBytes)
+				}
+				gotSlice = gotBytes[valueStart:end]
+				t.Errorf(
+					"FAIL: \"platform\" value bytes are NOT verbatim — key-order regression detected.\n"+
+						"  canonicalPlatformRaw has 'oid' before 'id' (non-alphabetical).\n"+
+						"  If BuildCreatePayload round-tripped platformRaw through map[string]any,\n"+
+						"  encoding/json would sort keys alphabetically ('id' before 'oid').\n"+
+						"  want (canonical raw): %s\n"+
+						"  got  (at platform:):  %s",
+					want, gotSlice,
+				)
+			}
 		}
 
 		// --- E: dynamicOutputs array — lexicographically sorted (E10) ---
@@ -470,6 +482,90 @@ func TestBuildCreatePayload_Golden(t *testing.T) {
 			t.Errorf("FAIL: `opportunity` key is present when CreateInput.Opportunity is nil; must be omitted")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TestBuildCreatePayload_ReservedKeys_Superset
+// ---------------------------------------------------------------------------
+
+// TestBuildCreatePayload_ReservedKeys_Superset enforces the hand-synced invariant
+// on reservedPayloadKeys (Sho-core round-1 nit finding #3): every top-level key
+// that BuildCreatePayload emits for a canonical input MUST be blocked when supplied
+// as a templateVariables key.
+//
+// Mechanism: call BuildCreatePayload with a canonical input (no templateVariables),
+// derive the full set of top-level structural keys from the output, then re-call
+// BuildCreatePayload with each of those keys as a templateVariables entry and assert
+// it returns an error. If reservedPayloadKeys omits any structural key, the re-call
+// would succeed silently — exactly the drift risk the guard is designed to prevent.
+//
+// This test does NOT access the unexported reservedPayloadKeys variable directly.
+// Instead, it uses the guard's own behaviour as the oracle: if a key is not in the
+// reserved set, it won't be blocked, and the test fails. Adding a new structural key
+// to BuildCreatePayload without updating reservedPayloadKeys causes this test to fail.
+func TestBuildCreatePayload_ReservedKeys_Superset(t *testing.T) {
+	t.Parallel()
+
+	canonicalInput := techzone.CreateInput{
+		Name:          "superset-check",
+		Purpose:       "Demo",
+		Region:        "us-east-2",
+		Datacenter:    "",
+		CollectionID:  "69650af0758b9e41de66b6ae",
+		Template:      "aws-account-hashicorp-ddr",
+		RequestMethod: "aws-account-hashicorp-ddr",
+		CloudAccount:  "ITZ",
+		Start:         frozenStart,
+		End:           frozenEnd,
+		User:          "superset@example.com",
+		Opportunity:   []string{"006Ka000003kVEoIAM"}, // include opportunity so its key appears
+		IUI:           "test-iui",                     // include iui so its key appears
+	}
+
+	// Build the canonical payload with no templateVariables to get the full
+	// set of structural top-level keys emitted by BuildCreatePayload.
+	canonicalBytes, err := techzone.BuildCreatePayload(canonicalPlatformRaw, nil, canonicalInput)
+	if err != nil {
+		t.Fatalf("canonical BuildCreatePayload: %v", err)
+	}
+
+	var canonicalMap map[string]any
+	if err := json.Unmarshal(canonicalBytes, &canonicalMap); err != nil {
+		t.Fatalf("unmarshal canonical payload: %v", err)
+	}
+
+	// For each structural key in the canonical output, assert that supplying it
+	// as a templateVariables key returns an error (i.e. it IS in reservedPayloadKeys).
+	//
+	// Skip keys that start with '_': those are the flat _NN_ dynamic-output keys,
+	// which are user-supplied and intentionally NOT in reservedPayloadKeys.
+	var failures []string
+	for structuralKey := range canonicalMap {
+		if strings.HasPrefix(structuralKey, "_") {
+			continue // dynamic output keys — not reserved
+		}
+
+		k := structuralKey // capture
+		t.Run("reserved_"+k, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := techzone.BuildCreatePayload(
+				canonicalPlatformRaw,
+				map[string]string{k: "injected"},
+				canonicalInput,
+			)
+			if err == nil {
+				failures = append(failures, k)
+				t.Errorf(
+					"FAIL: structural key %q is emitted by BuildCreatePayload but NOT blocked "+
+						"by the reserved-key guard.\n"+
+						"  reservedPayloadKeys is missing %q — add it to prevent silent "+
+						"clobbering via templateVariables (Sho-core nit #3).",
+					k, k,
+				)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
