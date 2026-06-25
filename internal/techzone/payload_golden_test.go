@@ -539,7 +539,6 @@ func TestBuildCreatePayload_ReservedKeys_Superset(t *testing.T) {
 	//
 	// Skip keys that start with '_': those are the flat _NN_ dynamic-output keys,
 	// which are user-supplied and intentionally NOT in reservedPayloadKeys.
-	var failures []string
 	for structuralKey := range canonicalMap {
 		if strings.HasPrefix(structuralKey, "_") {
 			continue // dynamic output keys — not reserved
@@ -555,7 +554,6 @@ func TestBuildCreatePayload_ReservedKeys_Superset(t *testing.T) {
 				canonicalInput,
 			)
 			if err == nil {
-				failures = append(failures, k)
 				t.Errorf(
 					"FAIL: structural key %q is emitted by BuildCreatePayload but NOT blocked "+
 						"by the reserved-key guard.\n"+

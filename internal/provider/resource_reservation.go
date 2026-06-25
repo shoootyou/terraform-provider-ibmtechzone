@@ -676,7 +676,17 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	// Any other non-2xx → hard error.
+	// 401/403 → auth failure — suppress body to avoid leaking SSO redirect HTML.
+	// Same guard as the poll loop, Final GET, and Delete paths (Ei R2 NF-01).
+	if httpStatus == 401 || httpStatus == 403 {
+		resp.Diagnostics.AddError(
+			"TECHZONE_API_KEY is invalid or expired",
+			"TECHZONE_API_KEY is invalid or expired. Refresh it at https://techzone.ibm.com and re-run.",
+		)
+		return
+	}
+
+	// Any other non-2xx → hard error with body excerpt.
 	if httpStatus < 200 || httpStatus >= 300 {
 		resp.Diagnostics.AddError(
 			"TechZone API error during Read",

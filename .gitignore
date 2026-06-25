@@ -4,6 +4,10 @@ temporal.tf
 temporal.auto.tfvars
 *.tfplan
 
+# ── Debug session state (Sui / AGENTS.md convention) ────────────────────────
+# Ephemeral investigation artifacts — never pushed to remote.
+.debug/
+
 # ── Go build artifacts ───────────────────────────────────────────────────────
 # Built provider binary (local `make build` output)
 terraform-provider-ibmtechzone
