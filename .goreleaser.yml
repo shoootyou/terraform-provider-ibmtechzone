@@ -13,6 +13,12 @@
 # (GPG_PRIVATE_KEY, GPG_FINGERPRINT) and never committed to the repository.
 version: 2
 
+# project_name overrides the default (repo directory name "terraform-provider-techzone")
+# to match the Go module, GNUmakefile BINARY, and TFC provider name "ibmtechzone".
+# Without this, {{ .ProjectName }} in name_template produces the wrong binary name
+# and terraform init fails with "could not find executable terraform-provider-ibmtechzone".
+project_name: terraform-provider-ibmtechzone
+
 before:
   hooks:
     - go mod verify
@@ -20,6 +26,9 @@ before:
 
 builds:
   - id: terraform-provider-ibmtechzone
+    # binary name inside the zip must include _v{{.Version}} so terraform init
+    # can locate "terraform-provider-ibmtechzone_v0.1.0" in the plugin cache.
+    binary: "terraform-provider-ibmtechzone_v{{ .Version }}"
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
