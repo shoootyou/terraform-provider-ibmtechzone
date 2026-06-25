@@ -3,15 +3,17 @@
 // BuildCreatePayload assembles the full POST /api/reservation/aws body from
 // three inputs:
 //   - platformRaw: verbatim bytes of platforms[0] returned by GET /api/collection/<id>
-//   - dynamicOutputs: caller-supplied map of _NN_ keys → values (user-provided, no defaults)
+//   - templateVariables: caller-supplied map of _NN_ keys → values from the TF
+//     template_variables attribute (user-provided, no defaults). These are emitted
+//     onto the wire as the dynamicOutputs[] array and flat _NN_ top-level keys.
 //   - in: CreateInput holding the scalar fields that vary per reservation
 //
 // The platform bytes are embedded via json.RawMessage — NO re-encoding or field
 // reordering (byte-identity requirement from RFC 022 §platform verbatim).
 //
-// Dynamic outputs are emitted in lexicographic key order (sort.Strings) in BOTH
-// the dynamicOutputs[] array AND as flat top-level keys — determinism requirement
-// per E10.
+// template_variables (TF attr) → dynamicOutputs[] + flat _NN_ keys (wire):
+// emitted in lexicographic key order (sort.Strings) in BOTH the dynamicOutputs[]
+// array AND as flat top-level keys — determinism requirement per E10.
 package techzone
 
 import (
@@ -21,7 +23,7 @@ import (
 )
 
 // reservedPayloadKeys is the set of top-level field names that BuildCreatePayload
-// emits as structural fields. Any dynamic_outputs key that collides with a member
+// emits as structural fields. Any template_variables key that collides with a member
 // of this set would silently overwrite a structural field — a category of injection
 // risk documented in Ei audit finding F-02.
 //
@@ -122,9 +124,12 @@ type dynOutputEntry struct {
 //   - platformRaw: verbatim bytes of platforms[0] from GET /api/collection/<id>.
 //     Embedded as json.RawMessage — NOT re-encoded through a struct, so key
 //     order and whitespace are preserved byte-for-byte.
-//   - dynamicOutputs: map of _NN_ output names → string values, supplied by
-//     the caller. No provider defaults are injected. nil or empty → emits
-//     "dynamicOutputs": [] and NO flat top-level _NN_ keys.
+//   - templateVariables: map of _NN_ output names → string values from the TF
+//     template_variables attribute, supplied by the caller. No provider defaults
+//     are injected. nil or empty → emits "dynamicOutputs": [] and NO flat
+//     top-level _NN_ keys. Wire payload keys are ALWAYS "dynamicOutputs" (the
+//     array) and the literal _NN_ key names (flat keys) — unchanged from the
+//     TechZone API contract.
 //   - in: scalar variable fields (see CreateInput).
 //
 // Fixed constants (from the disposition table, Phase 1):
@@ -152,7 +157,7 @@ type dynOutputEntry struct {
 //     OMITTED entirely when the slice is nil or empty. Sending a string instead of an
 //     array causes the live API to return HTTP 400.
 //   - "iui" is omitted when CreateInput.IUI == "".
-func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]string, in CreateInput) ([]byte, error) {
+func BuildCreatePayload(platformRaw json.RawMessage, templateVariables map[string]string, in CreateInput) ([]byte, error) {
 	// Guard 1 — json.Valid check at entry point (audit remediation item 2).
 	// Explicit early failure with a clear message, before any other processing.
 	// Prevents silent pass-through of invalid bytes into the outer json.Marshal.
@@ -160,16 +165,16 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 		return nil, fmt.Errorf("platformRaw is not valid JSON")
 	}
 
-	// Collect and sort dynamic output keys for deterministic emission (E10).
-	// Both the dynamicOutputs[] array and the flat top-level keys use this order.
-	sortedKeys := make([]string, 0, len(dynamicOutputs))
-	for k := range dynamicOutputs {
+	// Collect and sort template_variables keys for deterministic emission (E10).
+	// Both the dynamicOutputs[] array (wire) and the flat top-level keys use this order.
+	sortedKeys := make([]string, 0, len(templateVariables))
+	for k := range templateVariables {
 		sortedKeys = append(sortedKeys, k)
 	}
 	sort.Strings(sortedKeys)
 
 	// Guard 2 — reserved-key collision check (audit remediation item 1, Ei F-02).
-	// A dynamic_outputs key that matches a structural payload field would silently
+	// A template_variables key that matches a structural payload field would silently
 	// overwrite it — e.g. key "platform" would replace the verbatim json.RawMessage
 	// with a string, causing TechZone to return 500 (gotchas/techzone.md).
 	for _, k := range sortedKeys {
@@ -178,12 +183,13 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 		}
 	}
 
-	// Build the dynamicOutputs array in sorted key order.
+	// Build the dynamicOutputs array (wire key) in sorted key order.
+	// Wire key "dynamicOutputs" is the TechZone API field name — unchanged.
 	dynArray := make([]dynOutputEntry, 0, len(sortedKeys))
 	for _, k := range sortedKeys {
 		dynArray = append(dynArray, dynOutputEntry{
 			Name:  k,
-			Value: dynamicOutputs[k],
+			Value: templateVariables[k],
 		})
 	}
 
@@ -232,9 +238,10 @@ func BuildCreatePayload(platformRaw json.RawMessage, dynamicOutputs map[string]s
 	}
 
 	// Flat top-level _NN_ keys — dual-emit in the same sorted order (E10).
-	// Emitted only when dynamicOutputs is non-empty.
+	// Wire: the key names are the literal _NN_ strings from templateVariables.
+	// Emitted only when templateVariables is non-empty.
 	for _, k := range sortedKeys {
-		payload[k] = dynamicOutputs[k]
+		payload[k] = templateVariables[k]
 	}
 
 	// "opportunity": emitted as a JSON ARRAY when len > 0; OMITTED when nil/empty.

@@ -21,10 +21,11 @@ resource "ibmtechzone_reservation" "example" {
   collection_id = "5f43a1b2c3d4e5f6a7b8c9d0"
   user_email    = "user@example.com"
 
-  # dynamic_outputs: opaque _NN_ keys injected into the reservation payload.
+  # template_variables: opaque _NN_ keys injected into the reservation payload.
   # Keys are emitted in lexicographic order in both the dynamicOutputs[] array
-  # and as flat top-level keys (dual-emit). An empty map {} is valid.
-  dynamic_outputs = {
+  # (TechZone API wire field) and as flat top-level keys (dual-emit).
+  # An empty map {} is valid.
+  template_variables = {
     "_04_hcp_org"     = "org-AbCdEfGh"
     "_05_hcp_project" = "project-XxYyZz12"
   }
@@ -63,15 +64,15 @@ The following arguments are supported:
   Also used as the `IBMID` field in the delete payload.
   Changing this value forces a new resource.
 
-* `dynamic_outputs` - (Required, Map of String) Opaque `_NN_name` output keys
+* `template_variables` - (Required, Map of String) Opaque `_NN_name` output keys
   mapped to string values. These are injected into the TechZone reservation
-  payload in two forms:
+  payload in two forms (mapped to the TechZone API's `dynamicOutputs` wire field):
   1. A `dynamicOutputs` array (elements in **lexicographic key order**).
   2. Flat top-level keys using the same names (dual-emit).
 
   An empty map (`{}`) is valid: it produces `"dynamicOutputs": []` and no flat
   keys. Keys conventionally follow the `_NN_name` pattern used by TechZone
-  dynamic outputs (e.g. `_04_hcp_org`, `_05_hcp_project`), but the provider
+  template variables (e.g. `_04_hcp_org`, `_05_hcp_project`), but the provider
   does not validate key format — the naming convention is enforced by TechZone,
   not the schema. Keys must not collide with reserved payload fields (the
   provider returns a plan-time error if they do).

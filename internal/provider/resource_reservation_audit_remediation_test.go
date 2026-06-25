@@ -2,7 +2,7 @@
  * @spec-handoff — Audit Remediation (Round 1) — resource_reservation.go contracts
  *
  * @interface reservationResource.Schema (collection_id attribute)
- * @interface reservationResource.Schema (dynamic_outputs attribute — Required assertion)
+ * @interface reservationResource.Schema (template_variables attribute — Required assertion)
  * @interface mockTechZoneServer.handlePoll — nil-status sequence capability
  *
  * @behavior (additions — audit remediation)
@@ -15,8 +15,8 @@
  *     path-metacharacters (e.g. "../foo", "a/b") MUST be rejected by the validator
  *     before the plan reaches Apply.
  *
- *   DYNAMIC_OUTPUTS REQUIRED ASSERTION:
- *   - The dynamic_outputs schema attribute MUST be Required: true (not Optional, not Computed).
+ *   TEMPLATE_VARIABLES REQUIRED ASSERTION:
+ *   - The template_variables schema attribute MUST be Required: true (not Optional, not Computed).
  *   - The existing spec-handoff comment in resource_reservation_schema_unit_test.go
  *     incorrectly says "Optional+Computed" — this test pins the correct contract.
  *
@@ -85,41 +85,37 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Contract 9 — dynamic_outputs is Required (spec-handoff comment fix)
+// Contract 9 — template_variables is Required (spec-handoff comment fix)
 // ---------------------------------------------------------------------------
 
-// TestReservationSchema_DynamicOutputs_IsRequired asserts that the dynamic_outputs
+// TestReservationSchema_DynamicOutputs_IsRequired asserts that the template_variables
 // attribute is Required: true.
 //
 // The spec-handoff comment in resource_reservation_schema_unit_test.go (line 12)
 // incorrectly states "Optional+Computed with RequiresReplace". The actual schema
-// (resource_reservation.go:154) has Required: true. This test pins the actual
-// contract so a future change from Required to Optional would be caught.
-//
-// This test should be GREEN against current code (dynamic_outputs IS Required:true).
-// It is added as an explicit behavioral assertion (the spec-handoff comment will be
-// corrected by Kou as item 9 of the remediation).
+// has Required: true. This test pins the actual contract so a future change from
+// Required to Optional would be caught.
 func TestReservationSchema_DynamicOutputs_IsRequired(t *testing.T) {
 	t.Parallel()
 
 	s := resourceSchemaForDelete(t)
 
-	attr, ok := s.Attributes["dynamic_outputs"]
+	attr, ok := s.Attributes["template_variables"]
 	if !ok {
-		t.Fatal("FAIL: attribute \"dynamic_outputs\" is absent from schema")
+		t.Fatal("FAIL: attribute \"template_variables\" is absent from schema")
 	}
 
 	mapAttr, ok := attr.(rschema.MapAttribute)
 	if !ok {
-		t.Fatalf("FAIL: \"dynamic_outputs\" is %T, want rschema.MapAttribute", attr)
+		t.Fatalf("FAIL: \"template_variables\" is %T, want rschema.MapAttribute", attr)
 	}
 
-	// Contract: dynamic_outputs MUST be Required.
+	// Contract: template_variables MUST be Required.
 	// The spec-handoff comment claimed Optional+Computed but the schema and
 	// intended behavior are unambiguously Required.
 	if !mapAttr.Required {
 		t.Errorf(
-			"FAIL: dynamic_outputs must be Required:true\n"+
+			"FAIL: template_variables must be Required:true\n"+
 				"  mapAttr.Required == false\n"+
 				"  The spec-handoff comment in resource_reservation_schema_unit_test.go (line 12)\n"+
 				"  incorrectly stated 'Optional+Computed with RequiresReplace'. The correct\n"+
@@ -129,10 +125,10 @@ func TestReservationSchema_DynamicOutputs_IsRequired(t *testing.T) {
 
 	// Also assert it is NOT Optional or Computed (belt-and-suspenders).
 	if mapAttr.Optional {
-		t.Errorf("FAIL: dynamic_outputs must NOT be Optional (it is Required)")
+		t.Errorf("FAIL: template_variables must NOT be Optional (it is Required)")
 	}
 	if mapAttr.Computed {
-		t.Errorf("FAIL: dynamic_outputs must NOT be Computed (it is Required)")
+		t.Errorf("FAIL: template_variables must NOT be Computed (it is Required)")
 	}
 }
 

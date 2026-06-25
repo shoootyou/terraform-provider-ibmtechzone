@@ -50,10 +50,7 @@ func resourceSchemaForDelete(t *testing.T) rschema.Schema {
 // reservationModel containing reservationID so that req.State.Get() succeeds in Delete.
 //
 // E5 update: Template, HCPOrg, HCPProject removed from reservationModel;
-// DynamicOutputs map(string) added.
-//
-// RED: this helper will not compile until Kou updates reservationModel in E5 Task 2
-// (removes Template/HCPOrg/HCPProject fields, adds DynamicOutputs types.Map field).
+// TemplateVariables map(string) added (TF attribute: template_variables).
 func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsdk.State {
 	t.Helper()
 	ctx := context.Background()
@@ -75,7 +72,7 @@ func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsd
 		t.Fatalf("building empty service_links: %v", diags)
 	}
 
-	// E5: populate DynamicOutputs with two representative entries.
+	// E5: populate TemplateVariables with two representative entries.
 	// The delete path reads only UserEmail and ID from state, so the exact
 	// values here do not affect Delete behaviour — they just need to be
 	// structurally valid for the schema to accept state.Set().
@@ -84,7 +81,7 @@ func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsd
 		"_05_hcp_project": types.StringValue("test-hcp-project"),
 	})
 	if dynDiags.HasError() {
-		t.Fatalf("building dynamic_outputs map: %v", dynDiags)
+		t.Fatalf("building template_variables map: %v", dynDiags)
 	}
 
 	// E8 (Plan 114): RequesterContext is now part of the schema. The Framework
@@ -97,10 +94,10 @@ func buildDeleteState(t *testing.T, s rschema.Schema, reservationID string) tfsd
 	}
 	nullRC := types.ObjectNull(rcAttrTypes)
 
-	// New-contract model: Template/HCPOrg/HCPProject removed; DynamicOutputs added.
+	// New-contract model: Template/HCPOrg/HCPProject removed; TemplateVariables added.
 	// E8: RequesterContext null object added to satisfy schema type validation.
 	m := reservationModel{
-		DynamicOutputs:          dynMap,
+		TemplateVariables:       dynMap,
 		Region:                  types.StringValue("us-east-2"),
 		ReservationName:         types.StringValue("Reservation Name"),
 		Purpose:                 types.StringValue("Demo"),

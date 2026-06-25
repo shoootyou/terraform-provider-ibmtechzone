@@ -514,7 +514,7 @@ func (m *mockTechZoneServer) handleDelete(w http.ResponseWriter, r *http.Request
 // reservationConfig returns a complete Terraform config for a
 // ibmtechzone_reservation resource, using the given mock server URL and api_key.
 //
-// E5 update: hcp_org / hcp_project removed from schema; replaced by dynamic_outputs map.
+// E5 update: hcp_org / hcp_project removed from schema; replaced by template_variables map.
 func reservationConfig(mockURL, apiKey string) string {
 	return fmt.Sprintf(`
 provider "ibmtechzone" {
@@ -525,7 +525,7 @@ provider "ibmtechzone" {
 resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
-  dynamic_outputs           = {
+  template_variables        = {
     "_04_hcp_org"     = "test-hcp-org"
     "_05_hcp_project" = "test-hcp-project"
   }
@@ -538,7 +538,7 @@ resource "ibmtechzone_reservation" "test" {
 // reservationConfigWithTimeout returns a config identical to reservationConfig
 // but with an explicit timeout_minutes value so tests can change it between steps.
 //
-// E5 update: hcp_org / hcp_project removed; replaced by dynamic_outputs map.
+// E5 update: hcp_org / hcp_project removed; replaced by template_variables map.
 func reservationConfigWithTimeout(mockURL, apiKey string, timeoutMinutes int) string {
 	return fmt.Sprintf(`
 provider "ibmtechzone" {
@@ -549,7 +549,7 @@ provider "ibmtechzone" {
 resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
-  dynamic_outputs           = {
+  template_variables        = {
     "_04_hcp_org"     = "test-hcp-org"
     "_05_hcp_project" = "test-hcp-project"
   }

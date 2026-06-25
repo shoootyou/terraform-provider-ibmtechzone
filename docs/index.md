@@ -52,7 +52,8 @@ indistinguishable from the API response).
 from the collection response is captured as raw JSON bytes and embedded
 byte-identical into the POST payload via `json.RawMessage` — no re-encoding,
 no field reordering, no normalization. This preserves whatever structure
-TechZone expects, including any undocumented fields. The `dynamic_outputs`
-map holds opaque `{name, value}` pairs that the provider passes through
-without introspection: the `_NN_name` key convention is a TechZone contract,
-not a provider concern, and template variables are not API-discoverable.
+TechZone expects, including any undocumented fields. The `template_variables`
+map (TF attribute) holds opaque `{name, value}` pairs that the provider passes
+through without introspection, emitting them as the `dynamicOutputs` wire field:
+the `_NN_name` key convention is a TechZone contract, not a provider concern,
+and template variables are not API-discoverable.

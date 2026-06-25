@@ -49,8 +49,8 @@ type reservationResource struct {
 // reservationModel is the Terraform state model for ibmtechzone_reservation.
 type reservationModel struct {
 	// Identity inputs (RequiresReplace)
-	DynamicOutputs   types.Map    `tfsdk:"dynamic_outputs"`
-	Region           types.String `tfsdk:"region"`
+	TemplateVariables types.Map    `tfsdk:"template_variables"`
+	Region            types.String `tfsdk:"region"`
 	ReservationName  types.String `tfsdk:"reservation_name"`
 	Purpose          types.String `tfsdk:"purpose"`
 	CollectionID     types.String `tfsdk:"collection_id"`
@@ -149,20 +149,22 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 		MarkdownDescription: "Manages an IBM TechZone AWS account reservation. " +
 			"Models the lifecycle of a temporary AWS account provisioned from the " +
 			"TechZone pool.\n\n" +
-			"> **Note:** Identity attributes (`dynamic_outputs`, `region`, `reservation_name`, " +
+			"> **Note:** Identity attributes (`template_variables`, `region`, `reservation_name`, " +
 			"`purpose`, `collection_id`, `user_email`) trigger replacement when changed. " +
 			"`timeout_minutes` and `reservation_duration_days` are operational and do not " +
 			"trigger replacement.",
 		Attributes: map[string]schema.Attribute{
 			// --- Identity inputs (RequiresReplace) ---
-			"dynamic_outputs": schema.MapAttribute{
-				MarkdownDescription: "Map of opaque `_NN_` output keys to string values, " +
-					"injected into the reservation payload as both a `dynamicOutputs` array " +
-					"(in lexicographic key order) and as flat top-level keys (dual-emit).\n\n" +
+			"template_variables": schema.MapAttribute{
+				MarkdownDescription: "Map of opaque `_NN_` output keys to string values " +
+					"(TF attribute: `template_variables`). Injected into the reservation " +
+					"payload as both a `dynamicOutputs` array (in lexicographic key order) " +
+					"and as flat top-level keys (dual-emit). These map to the TechZone API's " +
+					"`dynamicOutputs` wire field.\n\n" +
 					"Keys follow the `_NN_name` convention (e.g. `_04_hcp_org`, " +
 					"`_05_hcp_project`). An empty map (`{}`) is valid and results in " +
 					"`\"dynamicOutputs\": []` with no flat keys.\n\n" +
-					"Example:\n```hcl\ndynamic_outputs = {\n  \"_04_hcp_org\"     = " +
+					"Example:\n```hcl\ntemplate_variables = {\n  \"_04_hcp_org\"     = " +
 					"\"my-hcp-org\"\n  \"_05_hcp_project\" = \"my-hcp-project\"\n}\n```",
 				ElementType: types.StringType,
 				Required:    true,
@@ -348,9 +350,10 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	// Read dynamic_outputs from the plan into a plain Go map.
-	var dynamicOutputs map[string]string
-	resp.Diagnostics.Append(plan.DynamicOutputs.ElementsAs(ctx, &dynamicOutputs, false)...)
+	// Read template_variables (TF attr) from the plan into a plain Go map.
+	// Wire: template_variables → dynamicOutputs[] array + flat _NN_ keys in the payload.
+	var templateVariables map[string]string
+	resp.Diagnostics.Append(plan.TemplateVariables.ElementsAs(ctx, &templateVariables, false)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -432,7 +435,7 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 		}
 	}
 
-	payload, err := techzone.BuildCreatePayload(primaryPlatform.Raw, dynamicOutputs, input)
+	payload, err := techzone.BuildCreatePayload(primaryPlatform.Raw, templateVariables, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to build create payload", err.Error())
 		return

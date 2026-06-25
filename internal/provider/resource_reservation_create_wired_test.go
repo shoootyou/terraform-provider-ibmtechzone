@@ -8,7 +8,7 @@
  *     → c.GetCollection(ctx, plan.CollectionID)       // GET /api/collection/<id>
  *     → BuildCreatePayload(                            // 3-arg signature
  *           platforms[0].Raw,                          //   verbatim platform bytes
- *           plan.DynamicOutputs (map[string]string),   //   from TF config
+ *           plan.TemplateVariables (map[string]string), //   from TF config
  *           CreateInput{                               //   scalar fields
  *             User:        plan.UserEmail,             //   REQUIRED — absent → HTTP 500
  *             Opportunity: plan.RequesterContext.opportunity ([]string, when set),
@@ -41,7 +41,7 @@
  *           is set; OMITTED when requester_context is absent/null.
  *       (h) "iui" emitted as a string when requester_context.iui is set and non-empty;
  *           OMITTED otherwise.
- *   - On empty dynamic_outputs (nil map from TF config): "dynamicOutputs": [] emitted,
+ *   - On empty template_variables (nil map from TF config): "dynamicOutputs": [] emitted,
  *     NO flat _NN_ keys; create still proceeds normally.
  *
  * @edge-cases
@@ -54,6 +54,8 @@
  *   - requester_context absent from HCL → "opportunity" and "iui" absent from POST body.
  *   - requester_context present with opportunity list → "opportunity" in POST body is
  *     a JSON array, NOT a string.
+ *   - template_variables (TF attr) → dynamicOutputs[] + flat _NN_ keys (wire); the
+ *     wire payload key "dynamicOutputs" is always the TechZone API field name.
  *
  * @see ./resource_reservation.go      (Kou implements Create changes here)
  * @see ../techzone/collection.go      (GetCollection — already implemented)
@@ -156,17 +158,17 @@ const vmwareCollectionJSON = `{
 
 // ---------------------------------------------------------------------------
 // Terraform HCL configs — new schema (no template/hcp_org/hcp_project;
-// dynamic_outputs map present)
+// template_variables map present)
 // ---------------------------------------------------------------------------
 
 // reservationConfigV2 is the E5-era replacement for reservationConfig.
-// It omits template/hcp_org/hcp_project and populates dynamic_outputs.
+// It omits template/hcp_org/hcp_project and populates template_variables.
 func reservationConfigV2(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
 resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
-  dynamic_outputs           = {
+  template_variables        = {
     "_04_hcp_org"     = "test-hcp-org"
     "_05_hcp_project" = "test-hcp-project"
   }
@@ -176,13 +178,13 @@ resource "ibmtechzone_reservation" "test" {
 `
 }
 
-// reservationConfigV2_EmptyOutputs uses an empty dynamic_outputs map.
+// reservationConfigV2_EmptyOutputs uses an empty template_variables map.
 func reservationConfigV2_EmptyOutputs(mockURL, apiKey string) string {
 	return providerConfigHCL(mockURL, apiKey) + `
 resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
-  dynamic_outputs           = {}
+  template_variables        = {}
   timeout_minutes           = 1
   reservation_duration_days = 1
 }
@@ -197,7 +199,7 @@ resource "ibmtechzone_reservation" "test" {
 // Create path with the updated BuildCreatePayload:
 //
 //  1. Mock serves GET /api/collection/test-collection-id → ddrCollectionJSON
-//  2. Create builds the POST body using platforms[0].Raw (verbatim) + dynamic_outputs.
+//  2. Create builds the POST body using platforms[0].Raw (verbatim) + template_variables.
 //  3. Assertions on the captured POST body:
 //     (a) "user" key PRESENT and equal to user_email ("test@example.com").
 //         Plan 114 live fix: absent `user` → HTTP 500 from real API.
@@ -343,9 +345,8 @@ func TestReservationCreate_Wired_PostBodyShape(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestReservationCreate_Wired_EmptyDynamicOutputs verifies that an empty
-// dynamic_outputs map results in "dynamicOutputs": [] and NO flat _NN_ keys.
-//
-// RED: same compile-fail as TestReservationCreate_Wired_PostBodyShape.
+// template_variables map results in "dynamicOutputs": [] and NO flat _NN_ keys.
+// (Wire payload key "dynamicOutputs" is the TechZone API field name — unchanged.)
 func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 	mock := newMockServer(t)
 	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
@@ -394,11 +395,10 @@ func TestReservationCreate_Wired_EmptyDynamicOutputs(t *testing.T) {
 		}
 	}
 
-	// "user" MUST be present even with empty dynamic_outputs (Plan 114 live fix).
-	// RED: current Create() does not wire user_email into payload.
+	// "user" MUST be present even with empty template_variables (Plan 114 live fix).
 	assertBodyString(t, got, "user", "test@example.com")
 
-	// "description" constant must be present regardless of dynamic_outputs.
+	// "description" constant must be present regardless of template_variables.
 	assertBodyString(t, got, "description", "Terraform-managed reservation")
 }
 
@@ -413,7 +413,7 @@ func reservationConfigV2_WithRequesterContext(mockURL, apiKey string) string {
 resource "ibmtechzone_reservation" "test" {
   collection_id             = "test-collection-id"
   user_email                = "test@example.com"
-  dynamic_outputs           = {
+  template_variables        = {
     "_04_hcp_org" = "test-hcp-org"
   }
   timeout_minutes           = 1
@@ -624,11 +624,8 @@ func TestReservationCreate_UnsupportedInfrastructure_Diagnostic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestReservationSchema_V2Config_IsValid asserts that the new HCL config shape
-// (dynamic_outputs map, no template/hcp_org/hcp_project) is accepted by the
+// (template_variables map, no template/hcp_org/hcp_project) is accepted by the
 // schema without diagnostics.
-//
-// RED: the current schema still has template/hcp_org/hcp_project as Required and
-// does not have dynamic_outputs. The new config will produce schema errors.
 func TestReservationSchema_V2Config_IsValid(t *testing.T) {
 	mock := newMockServer(t)
 	mock.SetCollectionResponse("test-collection-id", 200, ddrCollectionJSON)
