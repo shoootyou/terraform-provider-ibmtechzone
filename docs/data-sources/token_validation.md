@@ -26,7 +26,7 @@ resource "ibmtechzone_reservation" "example" {
     "_05_hcp_project"     = "project-XxYyZz12"
   }
 
-  requester_context {
+  requester_context = {
     opportunity = ["006Ka00000NPHdITZSTG"]
   }
 }

@@ -31,8 +31,8 @@ resource "ibmtechzone_reservation" "example" {
     "_05_hcp_project"     = "project-XxYyZz12"
   }
 
-  # requester_context: optional block for opportunity / account attribution.
-  requester_context {
+  # requester_context: optional attribute for opportunity / account attribution.
+  requester_context = {
     opportunity = ["006Ka00000NPHdITZSTG"]
     iui         = "ABC123DEF"
   }
@@ -85,7 +85,7 @@ The following arguments are supported:
   (the provider returns a plan-time error if they do).
   Changing this value forces a new resource.
 
-* `requester_context` - (Optional, Block) Requester and account context for the
+* `requester_context` - (Optional, Object) Requester and account context for the
   reservation. Contains:
   * `opportunity` - (Optional, List of String) Salesforce opportunity IDs associated
     with this reservation (e.g. `["006Ka00000NPHdITZSTG"]`).

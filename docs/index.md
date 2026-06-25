@@ -13,7 +13,7 @@ terraform {
   required_providers {
     ibmtechzone = {
       source  = "registry.terraform.io/shoootyou/ibmtechzone"
-      version = "~> 0.2"
+      version = "~> 0.1"
     }
   }
 }
