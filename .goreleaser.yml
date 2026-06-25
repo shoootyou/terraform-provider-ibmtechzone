@@ -86,8 +86,8 @@ release:
   # POST to registry upload-links API).
   # owner/name resolved automatically from GITHUB_TOKEN context — no hardcoded
   # repo reference so the config survives repository transfers.
-  extra_files:
-    - glob: terraform-registry-manifest.json
+  # Note: terraform-registry-manifest.json is already bundled inside every
+  # platform zip via archives.files (line 58-59). No extra_files needed here.
 
 # Do not create a changelog — this is a provider repo; changelogs are managed
 # separately in release notes.

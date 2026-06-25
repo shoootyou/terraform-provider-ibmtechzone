@@ -465,7 +465,7 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 
 	reservationID := createResp.ID
 
-	// Poll loop: GET /api/reservation/<id> every 10s until Ready or terminal.
+	// Poll loop: GET /api/reservation/aws/<id> every 10s until Ready or terminal.
 	// Poll starts at T+0: first GET immediately, before the first ticker tick
 	// (audit fix Sho-A #2 / medium finding #5).
 	timeoutMinutes := plan.TimeoutMinutes.ValueInt64()
