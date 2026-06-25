@@ -1,11 +1,12 @@
 # Automated release pipeline
 
 -> **Note (2026-06)** The CI-based publish flow described here (GitHub Release →
-`publish.yml` workflow dispatch → TFC registry upload) reflects the **intended
-future state**. The v0.2.0 release was published via a manual Terraform Cloud
-private-registry API upload to `app.terraform.io/hashicorp-ddr-platform-dev`.
-The public registry address (`registry.terraform.io/shoootyou/ibmtechzone`) has
-not yet been published. When the CI flow is activated, this note should be removed.
+`publish.yml` workflow dispatch → Terraform Registry upload) reflects the
+**intended target path** for the public registry
+(`registry.terraform.io/shoootyou/ibmtechzone`). Early builds were validated
+via a manual private-registry upload before the automated flow was activated.
+When the CI flow is live and a public release has been confirmed, this note
+should be removed.
 
 ## Overview
 
