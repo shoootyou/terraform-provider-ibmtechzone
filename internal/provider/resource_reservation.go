@@ -52,11 +52,11 @@ type reservationModel struct {
 	// Identity inputs (RequiresReplace)
 	TemplateVariables types.Map    `tfsdk:"template_variables"`
 	Region            types.String `tfsdk:"region"`
-	ReservationName  types.String `tfsdk:"reservation_name"`
-	Purpose          types.String `tfsdk:"purpose"`
-	CollectionID     types.String `tfsdk:"collection_id"`
-	UserEmail        types.String `tfsdk:"user_email"`
-	RequesterContext types.Object `tfsdk:"requester_context"`
+	ReservationName   types.String `tfsdk:"reservation_name"`
+	Purpose           types.String `tfsdk:"purpose"`
+	CollectionID      types.String `tfsdk:"collection_id"`
+	UserEmail         types.String `tfsdk:"user_email"`
+	RequesterContext  types.Object `tfsdk:"requester_context"`
 
 	// Operational inputs (no RequiresReplace)
 	ReservationDurationDays types.Int64 `tfsdk:"reservation_duration_days"`
@@ -392,10 +392,11 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 	primaryRegion := primaryPlatform.Regions[0]
 
 	// Compute start/end timestamps: start = now+1min, end = now+1min+duration_days.
-	now := r.now().UTC()
-	start := now.Add(1 * time.Minute).Format("2006-01-02T15:04:05.000Z")
+	now := r.now().UTC().Truncate(time.Minute)
 	durationDays := plan.ReservationDurationDays.ValueInt64()
-	end := now.Add(1*time.Minute + time.Duration(durationDays)*24*time.Hour).Format("2006-01-02T15:04:05.000Z")
+
+	start := now.Add(time.Minute).Format("2006-01-02T15:04:05.000Z")
+	end := now.Add(time.Duration(durationDays) * 24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
 
 	input := techzone.CreateInput{
 		Name:          plan.ReservationName.ValueString(),
