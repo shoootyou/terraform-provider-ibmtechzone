@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/shoootyou/terraform-provider-ibmtechzone/compare/v1.0.0...v1.0.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **reservation:** prevent end-date overshoot beyond requested duration ([#21](https://github.com/shoootyou/terraform-provider-ibmtechzone/issues/21)) ([655ba35](https://github.com/shoootyou/terraform-provider-ibmtechzone/commit/655ba35fffbd1a22dd63e1b2f55107f54598518a))
+
 ## [1.0.0](https://github.com/shoootyou/terraform-provider-ibmtechzone/compare/v0.1.0...v1.0.0) (2026-07-01)
 
 
