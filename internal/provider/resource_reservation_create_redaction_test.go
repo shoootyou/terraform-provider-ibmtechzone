@@ -311,6 +311,145 @@ func assertContextCancelledDiagnostic(t *testing.T, resp *resource.CreateRespons
 }
 
 // ---------------------------------------------------------------------------
+// r3 audit finding 1 (round 3, CRITICAL) — Create()'s own initial POST
+// /api/reservation/aws (the create call itself, BEFORE GetCollection()'s
+// result is ever used to poll) had zero 401/403/302 guard: any auth-failure
+// or SSO-redirect response leaked up to 512 raw bytes directly into
+// resp.Diagnostics. This is the 4th and final sibling of the same guard
+// family (poll loop / Final GET above, Read()'s own initial GET in
+// resource_reservation_extension_test.go).
+// ---------------------------------------------------------------------------
+
+// createPostFixture is a minimal in-process HTTP fixture exercising only
+// reservationResource.Create()'s GetCollection() + create-POST call
+// sequence — the poll loop and Final GET are never reached because the
+// create-POST's own auth-failure guard returns before either is dialed.
+type createPostFixture struct {
+	t  *testing.T
+	mu sync.Mutex
+
+	postStatus    int
+	postBody      string
+	postCallCount int
+}
+
+func newCreatePostFixture(t *testing.T, postStatus int, postBody string) *createPostFixture {
+	t.Helper()
+	return &createPostFixture{t: t, postStatus: postStatus, postBody: postBody}
+}
+
+// Server starts the httptest.Server and registers cleanup.
+func (f *createPostFixture) Server() *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(f.serveHTTP))
+	f.t.Cleanup(srv.Close)
+	return srv
+}
+
+// PostCallCount returns how many times POST /api/reservation/aws has been called.
+func (f *createPostFixture) PostCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.postCallCount
+}
+
+func (f *createPostFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/collection/"):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, createRedactionCollectionJSON)
+
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/reservation/aws"):
+		f.mu.Lock()
+		f.postCallCount++
+		status, body := f.postStatus, f.postBody
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+
+	default:
+		f.t.Logf("createPostFixture: unexpected request %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}
+}
+
+// runCreatePOSTAuthOrRedirectBodyRedactedTest exercises Create()'s own
+// initial POST /api/reservation/aws with the given auth-failure/redirect
+// status and confirms the sentinel-embedded body never leaks into
+// resp.Diagnostics — mirrors
+// resource_reservation_extension_test.go's runExtensionAuthOrRedirectBodyRedactedTest
+// convention, applied to the create-POST call site instead of the
+// extension-POST.
+func runCreatePOSTAuthOrRedirectBodyRedactedTest(t *testing.T, postStatus int) {
+	t.Helper()
+	sentinelBody := fmt.Sprintf(`<html><body>Sign in to IBM — session %s</body></html>`, createRedactionSentinelBody)
+	fx := newCreatePostFixture(t, postStatus, sentinelBody)
+	srv := fx.Server()
+
+	r := buildCreateTestResource(t, srv.URL)
+	s := resourceSchemaForDelete(t)
+	plan := buildCreateTestPlan(t, s, 1)
+
+	req := resource.CreateRequest{Plan: plan}
+	resp := resource.CreateResponse{State: tfsdk.State{Schema: s, Raw: plan.Raw}}
+
+	// No bounded context timeout needed here (unlike the poll-loop/Final-GET
+	// tests above): the create-POST's own auth-failure guard returns
+	// immediately, before the poll loop's 10-second ticker is ever created.
+	entries := captureAllTFLogEntriesWithContext(t, context.Background(), func(ctx context.Context) {
+		r.Create(ctx, req, &resp)
+	})
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatalf("Create(): a %d on the create-POST must raise an auth-failure error, got none", postStatus)
+	}
+
+	var allMsgs strings.Builder
+	for _, d := range resp.Diagnostics {
+		allMsgs.WriteString(d.Summary())
+		allMsgs.WriteString(" ")
+		allMsgs.WriteString(d.Detail())
+		allMsgs.WriteString(" ")
+	}
+	if combined := allMsgs.String(); strings.Contains(combined, createRedactionSentinelBody) {
+		t.Errorf("r3 audit finding 1: Create()'s own POST /api/reservation/aws (status %d) leaked "+
+			"the response body sentinel into Diagnostics — the 401/403/302 guard must route to the "+
+			"canned auth-failure message, never the generic non-2xx branch that embeds the raw body: %q",
+			postStatus, combined)
+	}
+
+	assertNoSentinelLeak(t, entries, createRedactionSentinelBody, fmt.Sprintf("create-POST %d", postStatus))
+
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Create(): POST /api/reservation/aws called %d times, want exactly 1", got)
+	}
+}
+
+// TestCreateUnit_InitialPOST401_BodyNotLeakedToDiagnostics: a 401 on
+// Create()'s own create-POST must not leak its body.
+func TestCreateUnit_InitialPOST401_BodyNotLeakedToDiagnostics(t *testing.T) {
+	t.Parallel()
+	runCreatePOSTAuthOrRedirectBodyRedactedTest(t, http.StatusUnauthorized)
+}
+
+// TestCreateUnit_InitialPOST403_BodyNotLeakedToDiagnostics: a 403 on
+// Create()'s own create-POST must not leak its body.
+func TestCreateUnit_InitialPOST403_BodyNotLeakedToDiagnostics(t *testing.T) {
+	t.Parallel()
+	runCreatePOSTAuthOrRedirectBodyRedactedTest(t, http.StatusForbidden)
+}
+
+// TestCreateUnit_InitialPOST302_BodyNotLeakedToDiagnostics: the client never
+// follows redirects (CheckRedirect returns http.ErrUseLastResponse), so a raw
+// 302 can reach Create()'s own create-POST directly and may carry SSO
+// redirect HTML or session metadata; must not leak its body.
+func TestCreateUnit_InitialPOST302_BodyNotLeakedToDiagnostics(t *testing.T) {
+	t.Parallel()
+	runCreatePOSTAuthOrRedirectBodyRedactedTest(t, http.StatusFound)
+}
+
+// ---------------------------------------------------------------------------
 // r2 finding 1 (audit round 2, HIGH), poll loop — see the file-level comment
 // and resource_reservation_extension_test.go's "r2 finding 1" section for
 // full background.

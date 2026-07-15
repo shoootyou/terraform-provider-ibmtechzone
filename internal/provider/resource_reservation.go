@@ -646,6 +646,23 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 		resp.Diagnostics.AddError("TechZone API unreachable", fmt.Sprintf("POST /api/reservation/aws: %s", err.Error()))
 		return
 	}
+	// 401/403/302 → auth failure — suppress body to avoid leaking SSO redirect
+	// HTML. Same guard as Read()'s initial GET, the poll loop, Final GET, and
+	// Delete() (r3 audit finding 1 — this was the last unguarded call site
+	// sharing the identical risk pattern: providerData.TokenErr is probed once
+	// at Configure() time and only read, never re-validated, on every
+	// subsequent Create() call, so a token can expire mid-apply just as it can
+	// for the other 5 already-guarded sites). Falling through to the generic
+	// non-2xx branch below would otherwise embed up to 512 raw response bytes
+	// directly into resp.Diagnostics — the channel always visible to the user
+	// on every plan/apply/refresh, no TF_LOG required.
+	if status == 401 || status == 403 || status == 302 {
+		resp.Diagnostics.AddError(
+			"TECHZONE_API_KEY is invalid or expired",
+			"TECHZONE_API_KEY is invalid or expired. Refresh it at https://techzone.ibm.com and re-run.",
+		)
+		return
+	}
 	if status < 200 || status >= 300 {
 		resp.Diagnostics.AddError(
 			"TechZone reservation create failed",
