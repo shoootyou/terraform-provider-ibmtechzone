@@ -219,32 +219,63 @@ func TestClassifyExtensionResponse(t *testing.T) {
 		{name: "not_2xx_300_boundary_is_ambiguous_not_success", status: 300, body: extensionSuccessBody, want: extensionAmbiguous},
 
 		// --- audit round-1 finding #5: a 2xx status is no longer trusted on
-		// its own — the body must match the minimal confirmed success shape
-		// (status==200 or a non-empty message). Ei empirically confirmed
-		// that, pre-fix, an HTML body, an empty body, or an unrelated JSON
-		// shape all resolved to extensionSucceeded merely because the HTTP
-		// status happened to be 2xx. ---
+		// its own — the body must match the confirmed success shape. Ei
+		// empirically confirmed that, pre-fix, an HTML body, an empty body,
+		// or an unrelated JSON shape all resolved to extensionSucceeded
+		// merely because the HTTP status happened to be 2xx. ---
 		{name: "success_2xx_empty_body_is_ambiguous_not_success", status: 200, body: ``, want: extensionAmbiguous},
 		{name: "success_2xx_html_body_is_ambiguous_not_success", status: 200, body: `<html><body>OK</body></html>`, want: extensionAmbiguous},
 		{name: "success_2xx_unrelated_json_shape_is_ambiguous_not_success", status: 200, body: `{"foo":"bar"}`, want: extensionAmbiguous},
 		{
-			// Both markers explicitly present-but-zero/empty must NOT count
-			// as a match — the check is "Status==200 OR Message non-empty",
-			// not "the two fields are merely present in the JSON."
+			// r3 audit finding 4 (MEDIUM): the check requires BOTH markers
+			// now (Status==200 AND Message=="ok"), not "either alone" — both
+			// explicitly present-but-zero/empty must NOT count as a match.
 			name: "success_2xx_status_zero_and_message_empty_is_ambiguous", status: 200,
 			body: `{"status":0,"message":""}`, want: extensionAmbiguous,
 		},
 		{
-			// message alone (no status field at all) is a sufficient marker —
-			// proves the check is "either marker," not "both required."
-			name: "success_2xx_message_only_no_status_field_still_succeeds", status: 200,
-			body: `{"message":"ok"}`, want: extensionSucceeded,
+			// r3 audit finding 4 (MEDIUM) — hardened from the pre-fix OR
+			// check ("either marker alone sufficed", which this row's name
+			// used to describe and assert as extensionSucceeded). Real
+			// evidence (.yui-soul/ideas/terraform-provider-ibmtechzone.md,
+			// sessions 3/6) shows the API always returns both fields
+			// together in 100% of 10 observed successful calls — a message
+			// with no status field at all no longer represents a real
+			// observed shape, so it must now fall through to
+			// extensionAmbiguous rather than being trusted alone.
+			name: "success_2xx_message_only_no_status_field_now_ambiguous_after_hardening", status: 200,
+			body: `{"message":"ok"}`, want: extensionAmbiguous,
 		},
 		{
-			// status==200 alone (no message field at all) is likewise
-			// sufficient on its own.
-			name: "success_2xx_status_only_no_message_field_still_succeeds", status: 200,
-			body: `{"status":200}`, want: extensionSucceeded,
+			// r3 audit finding 4 (MEDIUM) — same hardening, the other
+			// formerly-sufficient marker alone: status==200 with no message
+			// field no longer represents a real observed shape either.
+			name: "success_2xx_status_only_no_message_field_now_ambiguous_after_hardening", status: 200,
+			body: `{"status":200}`, want: extensionAmbiguous,
+		},
+		{
+			// r3 audit finding 4 (MEDIUM) — the core regression this
+			// hardening fixes: under the OLD "either marker" OR check, this
+			// internally-contradictory body (a message claiming success
+			// alongside a status field explicitly claiming a server error)
+			// incorrectly classified as extensionSucceeded purely because
+			// Message was non-empty. The new check requires Status==200 AND
+			// Message=="ok" together — status 500 fails the Status==200
+			// half, so this must now be extensionAmbiguous.
+			name:   "success_2xx_contradictory_status500_message_ok_is_now_ambiguous_after_hardening",
+			status: 200,
+			body:   `{"status":500,"message":"ok"}`,
+			want:   extensionAmbiguous,
+		},
+		{
+			// r3 audit finding 4 (MEDIUM) — a non-"ok" message value must
+			// not pass, even paired with Status==200: the hardened check
+			// compares Message against the exact real-observed value "ok",
+			// not merely non-empty.
+			name:   "success_2xx_status200_message_not_exactly_ok_is_ambiguous",
+			status: 200,
+			body:   `{"status":200,"message":"OK"}`,
+			want:   extensionAmbiguous,
 		},
 
 		// --- both documented 400 rejection patterns → identical outcome ---
@@ -1333,11 +1364,66 @@ func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
 // unexpectedly large Message field produced an unbounded log line.
 // ---------------------------------------------------------------------------
 
-// TestReadUnit_Extension_Succeeds_LogsBodyPreview_MessageIsTruncated: a huge
-// (50,000-byte) Message field must still produce a bounded body_preview —
-// re-applying truncate() (already used at 5 other call sites in this file)
-// to ok2xx.Message specifically, before formatting.
-func TestReadUnit_Extension_Succeeds_LogsBodyPreview_MessageIsTruncated(t *testing.T) {
+// TestExtensionSuccessBodyPreview_MessageIsTruncated: a huge (50,000-byte)
+// Message field must still produce a bounded body_preview — re-applying
+// truncate() (already used at 5 other call sites in this file) to
+// ok2xx.Message specifically, before formatting.
+//
+// Exercises extensionSuccessBodyPreview directly (constructing the
+// tzExtensionSuccessResponse value in-test) rather than driving it through
+// the full Read() integration path: r3 audit finding 4 (in the same batch as
+// this finding) hardened classifyExtensionResponse to require BOTH
+// Status==200 AND Message=="ok" exactly, so a 50,000-byte, non-"ok" message
+// can no longer reach this code path via classifyExtensionResponse at all —
+// only "ok" (2 bytes) can ever classify as extensionSucceeded now. Testing
+// the extraction directly keeps this regression test meaningful (confirming
+// truncate() itself still bounds Message) independent of that now-stricter,
+// separately-tested gate. See TestReadUnit_Extension_Succeeds_LogsBodyPreview_LargeMessageIsNowUnreachable
+// below for the integration-level confirmation of that interaction.
+func TestExtensionSuccessBodyPreview_MessageIsTruncated(t *testing.T) {
+	t.Parallel()
+
+	hugeMessage := strings.Repeat("A", 50000)
+	got := extensionSuccessBodyPreview(tzExtensionSuccessResponse{Message: hugeMessage, Status: 200})
+
+	// Generous margin over the ~200-byte truncate() cap plus the
+	// `message=".." status=200` wrapper and any %q escaping overhead — the
+	// point is proving bounded growth, not pinning an exact byte count.
+	const maxAllowedLen = 250
+	if len(got) > maxAllowedLen {
+		t.Errorf("r3 audit finding 3: extensionSuccessBodyPreview output is %d bytes (input Message "+
+			"was %d bytes) — want capped at roughly 200 bytes via truncate(), got unbounded growth: %.60s...",
+			len(got), len(hugeMessage), got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("r3 audit finding 3: extensionSuccessBodyPreview output = %.60s... does not contain "+
+			"the truncate() ellipsis marker, suggesting the 50,000-byte Message was not actually truncated", got)
+	}
+}
+
+// TestExtensionSuccessBodyPreview_ShortMessagePassesThroughUnchanged: the
+// confirmed-real success shape ("ok", 2 bytes — the only value that can
+// reach this function via the legitimate Read() call path post-finding-4)
+// must render byte-identical to before this fix, proving truncate() is a
+// no-op for inputs already under the cap.
+func TestExtensionSuccessBodyPreview_ShortMessagePassesThroughUnchanged(t *testing.T) {
+	t.Parallel()
+	const want = `message="ok" status=200`
+	got := extensionSuccessBodyPreview(tzExtensionSuccessResponse{Message: "ok", Status: 200})
+	if got != want {
+		t.Errorf("extensionSuccessBodyPreview({Message:\"ok\",Status:200}) = %q, want %q", got, want)
+	}
+}
+
+// TestReadUnit_Extension_Succeeds_LogsBodyPreview_LargeMessageIsNowUnreachable:
+// documents, at the Read()-integration level, the interaction between r3
+// audit findings 3 and 4 fixed in the same batch — a 2xx body with a huge,
+// non-"ok" Message can no longer classify as extensionSucceeded at all
+// (finding 4's hardening), so it now falls through to the existing
+// no-blocking-error prune fallback instead of ever reaching the
+// body_preview log line finding 3 protects. Confirms the two fixes compose
+// correctly rather than silently reintroducing a bypass.
+func TestReadUnit_Extension_Succeeds_LogsBodyPreview_LargeMessageIsNowUnreachable(t *testing.T) {
 	t.Parallel()
 	const reservationID = "ext-res-1"
 	const initialExtendCount = int64(0)
@@ -1366,37 +1452,15 @@ func TestReadUnit_Extension_Succeeds_LogsBodyPreview_MessageIsTruncated(t *testi
 	})
 
 	if resp.Diagnostics.HasError() {
-		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+		t.Fatalf("Read(): a non-classifiable extension response must never raise a blocking error, got: %v", resp.Diagnostics)
 	}
 
-	// Generous margin over the ~200-byte truncate() cap plus the
-	// `message=".." status=200` wrapper and any %q escaping overhead — the
-	// point is proving bounded growth, not pinning an exact byte count.
-	const maxAllowedBodyPreviewLen = 250
-
-	found := false
 	for _, e := range entries {
-		if msg, _ := e["@message"].(string); msg != "Reservation extended" {
-			continue
+		if msg, _ := e["@message"].(string); msg == "Reservation extended" {
+			t.Errorf(`Read(): got a "Reservation extended" log entry for a huge, non-"ok" Message — `+
+				"post-finding-4, classifyExtensionResponse must reject this as extensionAmbiguous, "+
+				"never extensionSucceeded: %v", e)
 		}
-		bp, ok := e["body_preview"]
-		if !ok {
-			t.Fatalf(`Read(): "Reservation extended" log entry is missing body_preview: %v`, e)
-		}
-		bpStr, _ := bp.(string)
-		if len(bpStr) > maxAllowedBodyPreviewLen {
-			t.Errorf("r3 audit finding 3: body_preview is %d bytes (input Message was %d bytes) — "+
-				"want capped at roughly 200 bytes via truncate(), got unbounded growth: %.60s...",
-				len(bpStr), len(hugeMessage), bpStr)
-		}
-		if !strings.Contains(bpStr, "…") {
-			t.Errorf("r3 audit finding 3: body_preview = %.60s... does not contain the truncate() "+
-				"ellipsis marker, suggesting the 50,000-byte Message was not actually truncated", bpStr)
-		}
-		found = true
-	}
-	if !found {
-		t.Fatal(`Read(): expected a "Reservation extended" log entry, found none`)
 	}
 }
 

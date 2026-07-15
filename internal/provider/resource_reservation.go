@@ -148,11 +148,17 @@ type tzExtensionRejection struct {
 // tzExtensionSuccessResponse decodes the subset of a 2xx extension-POST
 // response body relevant to confirming a genuine success shape (idea
 // sessions 3/6: {"message":"ok","status":200}). classifyExtensionResponse
-// requires at least one of these two marker fields to be present (Status
-// equal to 200, or a non-empty Message) before trusting a 2xx HTTP status
-// code — audit round-1 finding #5: without this check, an HTML body, an
-// empty body, or any other unexpected shape arriving with a 2xx status
-// silently resolved to extensionSucceeded.
+// requires BOTH marker fields to match the confirmed-real shape exactly
+// (Status==200 AND Message=="ok") before trusting a 2xx HTTP status code —
+// audit round-1 finding #5 introduced the shape check (originally either
+// marker alone sufficed); r3 audit finding 4 hardened it to require both,
+// after the evidence in .yui-soul/ideas/terraform-provider-ibmtechzone.md
+// (sessions 3/6) showed the real API always returns both fields together in
+// 100% of 10 observed successful calls, never just one — an OR check let
+// internally-contradictory bodies like {"status":500,"message":"ok"} pass
+// as success. Without this check, an HTML body, an empty body, or any other
+// unexpected shape arriving with a 2xx status silently resolved to
+// extensionSucceeded.
 type tzExtensionSuccessResponse struct {
 	Message string `json:"message"`
 	Status  int    `json:"status"`
@@ -195,15 +201,20 @@ func buildExtensionPayload(userEmail, reservationID, extensionDate string) ([]by
 // Rules (confirmed by 6 empirical research sessions,
 // .yui-soul/ideas/terraform-provider-ibmtechzone.md):
 //   - status in [200,300) AND the body decodes into tzExtensionSuccessResponse
-//     with either Status==200 or a non-empty Message (the confirmed success
-//     shape, {"message":"ok","status":200}): extensionSucceeded. The body
-//     carries no usable reservation data beyond this shape check — the
-//     caller derives new state from the request it just sent, not from this
-//     response. A 2xx status whose body does NOT match this minimal shape
-//     (empty body, HTML, or any other unexpected form) falls through to
-//     extensionAmbiguous instead of being trusted on status code alone
-//     (audit round-1 finding #5 — the same fail-safe pattern already applied
-//     to the 400 path below).
+//     with BOTH Status==200 AND Message=="ok" (the confirmed success shape,
+//     {"message":"ok","status":200} — observed together, verbatim, in 100%
+//     of 10 real successful extension calls; never just one field alone):
+//     extensionSucceeded. The body carries no usable reservation data beyond
+//     this shape check — the caller derives new state from the request it
+//     just sent, not from this response. A 2xx status whose body does NOT
+//     match this exact shape (empty body, HTML, any other unexpected form,
+//     or an internally-contradictory body such as
+//     {"status":500,"message":"ok"}) falls through to extensionAmbiguous
+//     instead of being trusted on status code alone (audit round-1 finding
+//     #5 introduced this fail-safe pattern already applied to the 400 path
+//     below; r3 audit finding 4 hardened the condition from "either marker"
+//     to "both markers, exact value" after real evidence showed the two
+//     fields always arrive together).
 //   - status == 400 AND body decodes with policy.isExtendable != nil AND
 //     *policy.isExtendable == false: extensionNotPossible. This is the
 //     confirmed-universal signal across BOTH documented rejection patterns:
@@ -219,7 +230,7 @@ func buildExtensionPayload(userEmail, reservationID, extensionDate string) ([]by
 func classifyExtensionResponse(status int, body []byte) extensionOutcome {
 	if status >= 200 && status < 300 {
 		var ok2xx tzExtensionSuccessResponse
-		if err := json.Unmarshal(body, &ok2xx); err == nil && (ok2xx.Status == 200 || ok2xx.Message != "") {
+		if err := json.Unmarshal(body, &ok2xx); err == nil && ok2xx.Status == 200 && ok2xx.Message == "ok" {
 			return extensionSucceeded
 		}
 		return extensionAmbiguous
@@ -232,6 +243,20 @@ func classifyExtensionResponse(status int, body []byte) extensionOutcome {
 		}
 	}
 	return extensionAmbiguous
+}
+
+// extensionSuccessBodyPreview formats the body_preview log field for a
+// confirmed extensionSucceeded outcome from the validated struct fields
+// (never raw body bytes — r2 finding 2), capping Message at ~200 bytes via
+// the existing truncate() helper (r3 audit finding 3: switching to the
+// validated struct dropped the implicit cap that truncate(extBody, 200) gave
+// for free; an unexpectedly large Message field would otherwise produce an
+// unbounded log line). Extracted as its own function so this formatting can
+// be tested directly against an arbitrary tzExtensionSuccessResponse value,
+// independent of classifyExtensionResponse's own (now stricter — finding 4)
+// gate on how Message/Status combinations are allowed to reach this point.
+func extensionSuccessBodyPreview(ok2xx tzExtensionSuccessResponse) string {
+	return fmt.Sprintf("message=%q status=%d", truncate([]byte(ok2xx.Message), 200), ok2xx.Status)
 }
 
 // extensionWindowFractionValidator enforces that extension_window_fraction,
@@ -984,18 +1009,20 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		switch classifyExtensionResponse(extStatus, extBody) {
 		case extensionSucceeded:
 			// body_preview logs the VALIDATED struct fields (message, status),
-			// NOT raw body bytes (r2 finding 2). classifyExtensionResponse's
-			// shape check only confirms Status==200 or a non-empty Message —
-			// it does not reject unexpected additional fields (Go's
-			// json.Unmarshal ignores unknown keys). Logging truncate(extBody,
-			// 200) would reflect the body's FULL raw content verbatim,
-			// including any such unexpected field, exceeding what was
-			// actually validated. Re-decoding here (rather than threading the
-			// struct through classifyExtensionResponse's return signature)
-			// keeps that function's signature and existing test suite
-			// unchanged; the decode below is guaranteed to succeed
+			// NOT raw body bytes (r2 finding 2). Re-decoding here (rather than
+			// threading the struct through classifyExtensionResponse's return
+			// signature) keeps that function's signature and existing test
+			// suite unchanged; the decode below is guaranteed to succeed
 			// identically to the one classifyExtensionResponse already
-			// performed on this exact body to reach this branch.
+			// performed on this exact body to reach this branch — and, since
+			// r3 audit finding 4 hardened that function to require BOTH
+			// Status==200 AND Message=="ok" exactly, ok2xx.Message here is
+			// now always exactly "ok" via this call path. extensionSuccessBodyPreview
+			// still truncates defensively (r3 audit finding 3) rather than
+			// assuming that invariant holds forever — the same
+			// defense-in-depth posture already used elsewhere in this switch
+			// (see the 401/403/302 guard immediately below, dead code today
+			// for the identical reason, self-documented as intentional).
 			var ok2xx tzExtensionSuccessResponse
 			_ = json.Unmarshal(extBody, &ok2xx) // guaranteed success — see comment above
 			// Guarded with the same 401/403/302 check as finding #1, applied
@@ -1007,12 +1034,7 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 				"reservation_id": reservationID, "new_provision_until": newExtensionDate,
 			}
 			if extStatus != 401 && extStatus != 403 && extStatus != 302 {
-				// r3 audit finding 3 (MEDIUM): truncate ok2xx.Message before
-				// logging. Switching to the validated struct (r2 finding 2)
-				// dropped the implicit ~200-byte cap that truncate(extBody, 200)
-				// gave for free — an unexpectedly large Message field would
-				// otherwise produce an unbounded log line.
-				succeededLogFields["body_preview"] = fmt.Sprintf("message=%q status=%d", truncate([]byte(ok2xx.Message), 200), ok2xx.Status)
+				succeededLogFields["body_preview"] = extensionSuccessBodyPreview(ok2xx)
 			}
 			tflog.Info(ctx, "Reservation extended", succeededLogFields)
 			newState := mapResponseToModel(state, &apiResp)
