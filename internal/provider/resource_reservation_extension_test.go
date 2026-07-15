@@ -95,6 +95,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/defaults"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -216,6 +217,35 @@ func TestClassifyExtensionResponse(t *testing.T) {
 		{name: "success_200", status: 200, body: extensionSuccessBody, want: extensionSucceeded},
 		{name: "success_299_upper_boundary", status: 299, body: extensionSuccessBody, want: extensionSucceeded},
 		{name: "not_2xx_300_boundary_is_ambiguous_not_success", status: 300, body: extensionSuccessBody, want: extensionAmbiguous},
+
+		// --- audit round-1 finding #5: a 2xx status is no longer trusted on
+		// its own — the body must match the minimal confirmed success shape
+		// (status==200 or a non-empty message). Ei empirically confirmed
+		// that, pre-fix, an HTML body, an empty body, or an unrelated JSON
+		// shape all resolved to extensionSucceeded merely because the HTTP
+		// status happened to be 2xx. ---
+		{name: "success_2xx_empty_body_is_ambiguous_not_success", status: 200, body: ``, want: extensionAmbiguous},
+		{name: "success_2xx_html_body_is_ambiguous_not_success", status: 200, body: `<html><body>OK</body></html>`, want: extensionAmbiguous},
+		{name: "success_2xx_unrelated_json_shape_is_ambiguous_not_success", status: 200, body: `{"foo":"bar"}`, want: extensionAmbiguous},
+		{
+			// Both markers explicitly present-but-zero/empty must NOT count
+			// as a match — the check is "Status==200 OR Message non-empty",
+			// not "the two fields are merely present in the JSON."
+			name: "success_2xx_status_zero_and_message_empty_is_ambiguous", status: 200,
+			body: `{"status":0,"message":""}`, want: extensionAmbiguous,
+		},
+		{
+			// message alone (no status field at all) is a sufficient marker —
+			// proves the check is "either marker," not "both required."
+			name: "success_2xx_message_only_no_status_field_still_succeeds", status: 200,
+			body: `{"message":"ok"}`, want: extensionSucceeded,
+		},
+		{
+			// status==200 alone (no message field at all) is likewise
+			// sufficient on its own.
+			name: "success_2xx_status_only_no_message_field_still_succeeds", status: 200,
+			body: `{"status":200}`, want: extensionSucceeded,
+		},
 
 		// --- both documented 400 rejection patterns → identical outcome ---
 		{
@@ -490,6 +520,23 @@ func TestReservationSchema_ExtensionWindowFraction(t *testing.T) {
 	if fa.Default == nil {
 		t.Error("FAIL: `extension_window_fraction` must have a Default " +
 			"(spec: float64default.StaticFloat64(techzone.DefaultExtensionWindowFraction))")
+	} else {
+		// Audit round-1 finding #6: the checks above only confirm a Default
+		// is PRESENT, never that it resolves to the RIGHT value. A typo that
+		// replaces techzone.DefaultExtensionWindowFraction with an incorrect
+		// literal in Schema() would pass every assertion above undetected.
+		// Resolve the default the same way the Framework itself would at
+		// plan time and assert the actual resolved value.
+		defResp := &defaults.Float64Response{}
+		fa.Default.DefaultFloat64(context.Background(), defaults.Float64Request{Path: path.Root("extension_window_fraction")}, defResp)
+		if defResp.Diagnostics.HasError() {
+			t.Fatalf("FAIL: extension_window_fraction Default.DefaultFloat64() returned diagnostics: %v", defResp.Diagnostics)
+		}
+		if got := defResp.PlanValue.ValueFloat64(); got != techzone.DefaultExtensionWindowFraction {
+			t.Errorf("FAIL: extension_window_fraction default value = %v, want %v (techzone.DefaultExtensionWindowFraction — "+
+				"this assertion catches a typo'd literal that the presence-only check above would miss)",
+				got, techzone.DefaultExtensionWindowFraction)
+		}
 	}
 	if len(fa.Validators) == 0 {
 		t.Fatal("FAIL: `extension_window_fraction` must have at least one Validator (extensionWindowFractionValidator)")
@@ -564,6 +611,15 @@ type extensionReadFixture struct {
 	postStatus int
 	postBody   string
 
+	// forcePostTransportError, when true, makes the POST handler hijack the
+	// underlying TCP connection and close it without writing any HTTP
+	// response — simulating a genuine transport-layer failure (connectivity
+	// error, as opposed to a completed HTTP response with a non-2xx status).
+	// Hallazgo 3 remediation (audit round 1): exercises the extErr != nil
+	// branch in Read()'s extension-POST block, which had zero dedicated
+	// test coverage before this fix.
+	forcePostTransportError bool
+
 	postCallCount int
 	getCallCount  int
 	lastPostBody  []byte
@@ -573,6 +629,18 @@ func newExtensionReadFixture(t *testing.T, getStatus int, getBody string, postSt
 	t.Helper()
 	return &extensionReadFixture{
 		t: t, getStatus: getStatus, getBody: getBody, postStatus: postStatus, postBody: postBody,
+	}
+}
+
+// newExtensionReadFixtureWithPostTransportError builds a fixture whose GET
+// handler responds normally (getStatus/getBody) but whose POST handler
+// forces a transport-layer failure (hijack + abrupt connection close, no
+// HTTP response ever written) — see forcePostTransportError above.
+func newExtensionReadFixtureWithPostTransportError(t *testing.T, getStatus int, getBody string) *extensionReadFixture {
+	t.Helper()
+	return &extensionReadFixture{
+		t: t, getStatus: getStatus, getBody: getBody,
+		forcePostTransportError: true,
 	}
 }
 
@@ -595,9 +663,32 @@ func (f *extensionReadFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		fmt.Fprint(w, body)
 
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/reservation/aws/"):
-		raw, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.postCallCount++
+		force := f.forcePostTransportError
+		f.mu.Unlock()
+
+		if force {
+			// Hijack the raw TCP connection and close it without writing any
+			// response — the client sees a genuine transport error (e.g.
+			// "EOF" / "connection reset"), not a completed HTTP response.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				f.t.Fatal("extensionReadFixture: ResponseWriter does not support hijacking " +
+					"(needed to simulate a POST transport error)")
+				return
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				f.t.Fatalf("extensionReadFixture: hijack failed: %v", err)
+				return
+			}
+			conn.Close()
+			return
+		}
+
+		raw, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
 		f.lastPostBody = raw
 		status, body := f.postStatus, f.postBody
 		f.mu.Unlock()
@@ -734,6 +825,28 @@ func captureTFLogWarnings(t *testing.T, fn func(ctx context.Context)) []map[stri
 		}
 	}
 	return warns
+}
+
+// captureAllTFLogEntries runs fn with a tflog context wired to an in-memory
+// buffer and returns every log entry regardless of level. Broader than
+// captureTFLogWarnings above (which filters to @level=="warn" only) — used
+// where a test needs to scan every field of every log entry at any level,
+// mirroring tflog_sentinel_test.go's own convention of scanning ALL log
+// levels for a token/body leak, not just warnings (Hallazgo 1/5 remediation,
+// audit round 1).
+func captureAllTFLogEntries(t *testing.T, fn func(ctx context.Context)) []map[string]interface{} {
+	t.Helper()
+	var buf bytes.Buffer
+	ctx := tflogtest.RootLogger(context.Background(), &buf)
+
+	fn(ctx)
+
+	entries, err := tflogtest.MultilineJSONDecode(&buf)
+	if err != nil {
+		t.Logf("captureAllTFLogEntries: MultilineJSONDecode: %v (may be empty log)", err)
+		return nil
+	}
+	return entries
 }
 
 // fixedNowForExtensionTests is the reference "now" for every Read()-integration
@@ -930,6 +1043,283 @@ func TestReadUnit_Extension_AmbiguousResponse_FallsThroughToPrune_LogsWarn(t *te
 		t.Error("Read(): an ambiguous/unrecognized extension response MUST be logged at tflog.Warn — " +
 			"this is the concrete fix for the fail-silent-to-KEEP pattern (gotchas/ibm-techzone.md); " +
 			"silence here reproduces exactly the class of bug this plan exists to close")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hallazgo 1 (audit round 1, CRITICAL) — body_preview redaction for
+// 401/403/302 on the extension POST's ambiguous branch.
+//
+// The rest of this file (poll loop, Final GET, Delete) already suppresses
+// body_preview at 401/403 ("Ei R2 NF-01" — auth-rejection bodies may reflect
+// credential material or SSO redirect HTML). The extensionAmbiguous branch
+// in Read() did not apply that guard. These three tests prove the fix: a
+// unique, detectable sentinel embedded in the extension-POST response body
+// must never appear in ANY tflog entry when the POST completes with 401,
+// 403, or 302 — mirroring tflog_sentinel_test.go's sentinel-scan convention
+// for DoGet, applied here to the new Read()/extension-POST log path.
+// ---------------------------------------------------------------------------
+
+// extensionSentinelBodyValue is the unique marker embedded in a fabricated
+// 401/403/302 extension-POST response body for the redaction tests below.
+const extensionSentinelBodyValue = "SENTINEL-EXTENSION-BODY-DO-NOT-LOG"
+
+// runExtensionAuthOrRedirectBodyRedactedTest is the shared body for the three
+// Hallazgo-1 redaction tests: an extension POST completing with 401, 403, or
+// 302 must never surface its response body in any log entry — only
+// reservation_id + http_status are permitted.
+func runExtensionAuthOrRedirectBodyRedactedTest(t *testing.T, postStatus int) {
+	t.Helper()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(0)
+
+	sentinelBody := fmt.Sprintf(`<html><body>Sign in to IBM — session %s</body></html>`, extensionSentinelBodyValue)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+		postStatus, sentinelBody,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+
+	entries := captureAllTFLogEntries(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): extension POST status %d must never raise a blocking error, got: %v", postStatus, resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 1", got)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("Read(): expected at least one log entry for extension POST status %d, got none", postStatus)
+	}
+
+	for i, e := range entries {
+		for k, v := range e {
+			if strings.Contains(fmt.Sprintf("%v", v), extensionSentinelBodyValue) {
+				t.Errorf("Hallazgo 1: extension POST status %d — log entry %d field %q leaked the response body "+
+					"sentinel (body_preview must be suppressed for 401/403/302, same guard as the poll loop / "+
+					"Final GET / Delete paths): %v", postStatus, i, k, v)
+			}
+		}
+	}
+}
+
+// TestReadUnit_Extension_POST401_BodyPreviewRedacted: a 401 on the extension
+// POST (token invalidated in the window between the initial GET and this
+// POST) must not leak its body into any log entry.
+func TestReadUnit_Extension_POST401_BodyPreviewRedacted(t *testing.T) {
+	t.Parallel()
+	runExtensionAuthOrRedirectBodyRedactedTest(t, http.StatusUnauthorized)
+}
+
+// TestReadUnit_Extension_POST403_BodyPreviewRedacted: a 403 on the extension
+// POST (extension endpoint requires an elevated role/scope the caller's
+// token doesn't carry — tools.md documents this exact real-world case for
+// the related /extend endpoint) must not leak its body.
+func TestReadUnit_Extension_POST403_BodyPreviewRedacted(t *testing.T) {
+	t.Parallel()
+	runExtensionAuthOrRedirectBodyRedactedTest(t, http.StatusForbidden)
+}
+
+// TestReadUnit_Extension_POST302_BodyPreviewRedacted: the client never
+// follows redirects (CheckRedirect returns http.ErrUseLastResponse), so a
+// raw 302 can reach this branch directly and may carry SSO redirect HTML or
+// session metadata; must not leak its body.
+func TestReadUnit_Extension_POST302_BodyPreviewRedacted(t *testing.T) {
+	t.Parallel()
+	runExtensionAuthOrRedirectBodyRedactedTest(t, http.StatusFound)
+}
+
+// ---------------------------------------------------------------------------
+// Hallazgo 5 (audit round 1, MEDIUM) — observability symmetry: the
+// extensionSucceeded branch's "Reservation extended" log entry now includes
+// body_preview (previously only new_provision_until).
+// ---------------------------------------------------------------------------
+
+func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(0)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+		http.StatusOK, extensionSuccessBody,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+
+	entries := captureAllTFLogEntries(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+	}
+
+	found := false
+	for _, e := range entries {
+		if msg, _ := e["@message"].(string); msg != "Reservation extended" {
+			continue
+		}
+		bp, ok := e["body_preview"]
+		if !ok {
+			t.Fatalf(`Read(): "Reservation extended" log entry is missing body_preview `+
+				`(Hallazgo 5 — observability symmetry with the extensionAmbiguous branch): %v`, e)
+		}
+		if bpStr, _ := bp.(string); bpStr == "" {
+			t.Error(`Read(): "Reservation extended" log entry's body_preview is present but empty`)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal(`Read(): expected a "Reservation extended" log entry, found none`)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hallazgo 2 (audit round 1, HIGH) — distinguish "falls through to the
+// independent PastExpiry re-evaluation" from "prunes unconditionally
+// without re-evaluating."
+//
+// The 3 pre-existing *_FallsThroughToPrune tests above all use
+// provisionUntilInsideWindow, which is ALSO past fixedNow — so a mutant that
+// prunes unconditionally on any non-succeeded extension outcome (instead of
+// correctly falling through to the existing, independent PastExpiry check)
+// passes those 3 tests just the same. Shin empirically confirmed this gap by
+// temporarily mutating the implementation to prune unconditionally: all 3
+// tests still passed. This test uses a provisionUntil that is
+// simultaneously extension-window-eligible (duration=4/fraction=0.5) AND
+// strictly future relative to fixedNow (PastExpiry == false) — the two
+// checks disagree, so only a correct fall-through-and-re-evaluate
+// implementation keeps the reservation live.
+// ---------------------------------------------------------------------------
+
+// provisionUntilFutureInsideWindow: fixedNow + 24h. Independently verified
+// this session (Hallazgo 2 remediation, never hand-calculated): windowSeconds
+// = round(0.5*4*86400) = 172800s (2 days); windowStart = provisionUntilEpoch -
+// 172800 = fixedNow - 24h; since fixedNow >= windowStart, InExtensionWindow
+// returns eligible=true. Simultaneously, PastExpiry(provisionUntilFutureInsideWindow,
+// fixedNow) == false because provisionUntil (fixedNow+24h) is strictly AFTER
+// fixedNow (now < until, not now > until).
+const provisionUntilFutureInsideWindow = "2026-07-21T12:00:00Z"
+
+// TestReadUnit_Extension_RejectedButNotPastExpiry_RemainsLiveWithUnchangedEndDate:
+// Hallazgo 2 remediation. A rejected extension attempt whose provisionUntil is
+// still in the future (not past-expiry) must fall through to the existing,
+// independent PastExpiry check and KEEP the reservation live — not be pruned
+// unconditionally just because the extension attempt itself did not succeed.
+func TestReadUnit_Extension_RejectedButNotPastExpiry_RemainsLiveWithUnchangedEndDate(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(3)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilFutureInsideWindow, initialExtendCount),
+		http.StatusBadRequest, extensionRejectionLimitExhausted,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilFutureInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): a rejected extension attempt must never raise a blocking error, got: %v", resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 1", got)
+	}
+
+	// The critical assertion (Hallazgo 2): PastExpiry(provisionUntilFutureInsideWindow,
+	// fixedNow) == false because provisionUntil is strictly in the future. A
+	// mutant that prunes unconditionally on any non-succeeded extension
+	// outcome (instead of falling through to this independent, unchanged
+	// check) would incorrectly remove the resource here — which is exactly
+	// what Shin's empirical mutation proved the 3 pre-existing tests could
+	// not catch.
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Read(): rejected extension with provisionUntil still in the future must fall through to the " +
+			"existing PastExpiry check and KEEP the reservation — it was incorrectly removed from state " +
+			"(this is the exact gap Hallazgo 2 catches: unconditional prune vs. correct re-evaluation)")
+	}
+
+	var got reservationModel
+	if diags := resp.State.Get(context.Background(), &got); diags.HasError() {
+		t.Fatalf("resp.State.Get(): %v", diags)
+	}
+	if got.EndDate.ValueString() != provisionUntilFutureInsideWindow {
+		t.Errorf("end_date after rejected extension = %q, want unchanged %q", got.EndDate.ValueString(), provisionUntilFutureInsideWindow)
+	}
+	if got.ExtendCount.ValueInt64() != initialExtendCount {
+		t.Errorf("extend_count after rejected extension = %d, want unchanged %d (extension was rejected, not applied)",
+			got.ExtendCount.ValueInt64(), initialExtendCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hallazgo 3 (audit round 1, HIGH) — the extension POST's transport-error
+// branch (extErr != nil — connectivity failure, not a completed HTTP
+// response) had zero dedicated test coverage. Structurally identical code
+// path to extensionAmbiguous (log + break/fall-through) but never exercised.
+// ---------------------------------------------------------------------------
+
+// TestReadUnit_Extension_POSTTransportError_FallsThroughToPrune: forces a
+// genuine transport-layer failure specifically on the extension POST (the
+// initial canonical GET succeeds normally), and confirms the same
+// no-blocking-error fallback already proven for extensionAmbiguous /
+// extensionNotPossible.
+func TestReadUnit_Extension_POSTTransportError_FallsThroughToPrune(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(1)
+
+	fx := newExtensionReadFixtureWithPostTransportError(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): a POST transport error must never raise a blocking error, got: %v", resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Read(): extension POST attempted %d times, want exactly 1 (no in-process retry loop)", got)
+	}
+	if got := fx.GetCallCount(); got != 1 {
+		t.Errorf("Read(): canonical GET called %d times, want exactly 1", got)
+	}
+	// provisionUntilInsideWindow is strictly before fixedNow (verified this
+	// session) — the existing, unchanged PastExpiry check must prune it once
+	// the failed extension attempt falls through.
+	if !resp.State.Raw.IsNull() {
+		t.Error("Read(): a POST transport error must fall through to the existing PastExpiry prune — " +
+			"resource should have been removed from state, but it was not")
 	}
 }
 
