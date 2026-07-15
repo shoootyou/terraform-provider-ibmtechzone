@@ -145,6 +145,19 @@ type tzExtensionRejection struct {
 	} `json:"policy"`
 }
 
+// tzExtensionSuccessResponse decodes the subset of a 2xx extension-POST
+// response body relevant to confirming a genuine success shape (idea
+// sessions 3/6: {"message":"ok","status":200}). classifyExtensionResponse
+// requires at least one of these two marker fields to be present (Status
+// equal to 200, or a non-empty Message) before trusting a 2xx HTTP status
+// code — audit round-1 finding #5: without this check, an HTML body, an
+// empty body, or any other unexpected shape arriving with a 2xx status
+// silently resolved to extensionSucceeded.
+type tzExtensionSuccessResponse struct {
+	Message string `json:"message"`
+	Status  int    `json:"status"`
+}
+
 // extensionOutcome classifies a completed extension POST attempt.
 type extensionOutcome int
 
@@ -181,10 +194,16 @@ func buildExtensionPayload(userEmail, reservationID, extensionDate string) ([]by
 //
 // Rules (confirmed by 6 empirical research sessions,
 // .yui-soul/ideas/terraform-provider-ibmtechzone.md):
-//   - status in [200,300): extensionSucceeded. The confirmed success body
-//     ({"message":"ok","status":200}) carries no usable reservation data —
-//     the caller derives new state from the request it just sent, not from
-//     this response.
+//   - status in [200,300) AND the body decodes into tzExtensionSuccessResponse
+//     with either Status==200 or a non-empty Message (the confirmed success
+//     shape, {"message":"ok","status":200}): extensionSucceeded. The body
+//     carries no usable reservation data beyond this shape check — the
+//     caller derives new state from the request it just sent, not from this
+//     response. A 2xx status whose body does NOT match this minimal shape
+//     (empty body, HTML, or any other unexpected form) falls through to
+//     extensionAmbiguous instead of being trusted on status code alone
+//     (audit round-1 finding #5 — the same fail-safe pattern already applied
+//     to the 400 path below).
 //   - status == 400 AND body decodes with policy.isExtendable != nil AND
 //     *policy.isExtendable == false: extensionNotPossible. This is the
 //     confirmed-universal signal across BOTH documented rejection patterns:
@@ -199,7 +218,11 @@ func buildExtensionPayload(userEmail, reservationID, extensionDate string) ([]by
 //     equivalent to a clean rejection.
 func classifyExtensionResponse(status int, body []byte) extensionOutcome {
 	if status >= 200 && status < 300 {
-		return extensionSucceeded
+		var ok2xx tzExtensionSuccessResponse
+		if err := json.Unmarshal(body, &ok2xx); err == nil && (ok2xx.Status == 200 || ok2xx.Message != "") {
+			return extensionSucceeded
+		}
+		return extensionAmbiguous
 	}
 	if status == 400 {
 		var rej tzExtensionRejection
@@ -930,9 +953,20 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		}
 		switch classifyExtensionResponse(extStatus, extBody) {
 		case extensionSucceeded:
-			tflog.Info(ctx, "Reservation extended", map[string]any{
+			// body_preview added for observability symmetry with the
+			// extensionAmbiguous branch below (audit round-1 finding #5).
+			// Guarded with the same 401/403/302 check as finding #1, applied
+			// here for consistency — defense in depth only, since a genuine
+			// extensionSucceeded classification can never itself carry a
+			// 401/403/302 status (classifyExtensionResponse only returns it
+			// for status in [200,300)).
+			succeededLogFields := map[string]any{
 				"reservation_id": reservationID, "new_provision_until": newExtensionDate,
-			})
+			}
+			if extStatus != 401 && extStatus != 403 && extStatus != 302 {
+				succeededLogFields["body_preview"] = truncate(extBody, 200)
+			}
+			tflog.Info(ctx, "Reservation extended", succeededLogFields)
 			newState := mapResponseToModel(state, &apiResp)
 			newState.EndDate = types.StringValue(newExtensionDate)
 			newState.ExtendCount = types.Int64Value(derefInt64(apiResp.ExtendCount) + 1)
@@ -944,9 +978,22 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 			})
 			// fall through — unchanged
 		default: // extensionAmbiguous
-			tflog.Warn(ctx, "Extension response could not be classified, falling back to existing prune logic", map[string]any{
-				"reservation_id": reservationID, "http_status": extStatus, "body_preview": truncate(extBody, 200),
-			})
+			// Suppress body_preview at 401/403/302 — same guard already
+			// applied by the poll loop, Final GET, and Delete paths (Ei R2
+			// NF-01). A token can be invalidated in the window between the
+			// initial GET (already successful) and this POST, or the
+			// extension endpoint may require an elevated role and return
+			// 403; a raw 302 can also reach here (the client never follows
+			// redirects) and may carry SSO redirect HTML or session
+			// metadata. Log only reservation_id + http_status for these
+			// three cases (audit round-1 finding #1).
+			ambiguousLogFields := map[string]any{
+				"reservation_id": reservationID, "http_status": extStatus,
+			}
+			if extStatus != 401 && extStatus != 403 && extStatus != 302 {
+				ambiguousLogFields["body_preview"] = truncate(extBody, 200)
+			}
+			tflog.Warn(ctx, "Extension response could not be classified, falling back to existing prune logic", ambiguousLogFields)
 			// fall through — unchanged
 		}
 	}
