@@ -1,0 +1,948 @@
+/**
+ * @spec-handoff
+ *
+ * @interface buildExtensionPayload(userEmail, reservationID, extensionDate string) ([]byte, error)
+ * @behavior
+ *   - Returns JSON with exactly 5 keys: IBMID=userEmail, requestType="aws" (constant),
+ *     extensionDate=extensionDate (verbatim, an ABSOLUTE ISO date, not a delta),
+ *     reservationId=reservationID, id=reservationID (duplicate of reservationId —
+ *     confirmed required by the real API alongside reservationId).
+ *
+ * @interface classifyExtensionResponse(status int, body []byte) extensionOutcome
+ * @behavior
+ *   - status in [200,300) → extensionSucceeded (body carries no usable data).
+ *   - status==400 AND body decodes with policy.isExtendable != nil AND
+ *     *policy.isExtendable==false → extensionNotPossible. This is the UNIVERSAL
+ *     signal across both real rejection patterns (errors[] contents and the
+ *     "error" string vary by sub-case and MUST be ignored).
+ *   - Anything else (malformed JSON, policy.isExtendable absent/null, isExtendable
+ *     true at 400, any non-{2xx,400} status incl. 300/500 regardless of body) →
+ *     extensionAmbiguous.
+ *
+ * @interface extensionWindowFractionValidator (validator.Float64)
+ * @behavior
+ *   - ConfigValue null/unknown (attribute not set by user) → skip, zero diagnostics.
+ *   - Reads sibling reservation_duration_days via req.Config.GetAttribute (RAW
+ *     config, pre-default-resolution). If that sibling is null/unknown (KNOWN,
+ *     ACCEPTED LIMITATION — see spec's "Known limitation" section) → skip, zero
+ *     diagnostics, even if the fraction itself is out of spec.
+ *   - days<=0 → skip (not this validator's job to validate the sibling itself).
+ *   - fraction*days > days (i.e. fraction > 1.0) → AddAttributeError with the
+ *     exact pinned message (see spec §3d table); fraction*days <= days → zero
+ *     diagnostics (0.0 and 1.0 are both valid boundaries).
+ *
+ * @interface reservationResource.Read — extension-window integration point
+ * @behavior
+ *   - Inserted after IsTerminalStatus, before PastExpiry (spec §5).
+ *   - ok==false ("cannot determine") → tflog.Warn, extension skipped, falls
+ *     through unchanged to PastExpiry.
+ *   - eligible==true + extensionSucceeded → state updated (end_date = the new
+ *     computed extensionDate, extend_count = apiResp.ExtendCount+1), early
+ *     return — PastExpiry is skipped entirely for this Read() call.
+ *   - eligible==true + extensionNotPossible|extensionAmbiguous → falls through
+ *     unchanged to PastExpiry (existing prune/recreate flow) — NEVER a blocking
+ *     Diagnostics error for any extension-attempt failure mode.
+ *   - eligible==false (routine, most common case) → no POST call at all.
+ *
+ * @edge-cases
+ *   - Both 400 rejection patterns (limit-exhausted-after-N-uses vs.
+ *     extensionLimit:0-from-creation) MUST collapse to the identical
+ *     extensionNotPossible outcome — proves the parser ignores errors[]/error text.
+ *   - At most one extension POST per Read() call; no in-process retry loop.
+ *
+ * @see ./resource_reservation.go (Kou implements in E6)
+ * @see ../techzone/extension_window.go, ../techzone/extension_window_test.go
+ * @see .yui-soul/plans/wip/04-expiry-fix-and-extension-window/e4-extension-window-spec.md §3/§5/§6
+ * @see .yui-soul/ideas/terraform-provider-ibmtechzone.md (6 empirical sessions — wire contract source)
+ */
+
+// Package provider — internal (white-box) tests for the extension-window
+// feature: payload builder, 400-response classifier, the
+// extension_window_fraction cross-attribute validator, and the Read()
+// integration point. In package provider (not provider_test) so tests can
+// reach the unexported buildExtensionPayload, classifyExtensionResponse,
+// extensionOutcome/extensionWindowFractionValidator types, and call
+// r.Read() directly — same convention as
+// resource_reservation_delete_unit_test.go's Delete()-integration tests.
+//
+// RED GATE (none of this exists yet — only Phase A's expiry.go fix has
+// shipped): every test below either fails to COMPILE (buildExtensionPayload,
+// classifyExtensionResponse, extensionOutcome/extensionSucceeded/
+// extensionNotPossible/extensionAmbiguous, extensionWindowFractionValidator,
+// tzExtensionRejection, reservationModel.ExtensionWindowFraction,
+// reservationModel.ExtendCount, tzReservationResponse.ExtendCount, and
+// derefInt64 are all undefined identifiers) or, if the file were somehow
+// coerced to compile, would fail its assertions — because none of these
+// symbols exist in resource_reservation.go yet. This mirrors the precedented
+// compile-red pattern already used in this package by
+// resource_reservation_schema_unit_test.go (Plan 114).
+package provider
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	"github.com/hashicorp/terraform-plugin-log/tflogtest"
+	"github.com/shoootyou-ext/terraform-provider-ibmtechzone/internal/techzone"
+)
+
+// ---------------------------------------------------------------------------
+// Fixtures — verbatim/reconstructed from the spec (§ "Test fixtures for Shin")
+// and the 6-session idea file. Do not alter these bytes; they are pinned.
+// ---------------------------------------------------------------------------
+
+// extensionSuccessBody: verbatim, idea sessions 3/6. Carries no usable
+// reservation data — the caller derives new state from the request it just sent.
+const extensionSuccessBody = `{"message":"ok","status":200}`
+
+// extensionRejectionLimitExhausted: verbatim, real DDR collection, idea
+// session 6. errors:[] + validation.extension:true — the "used up the N
+// allotted extensions" pattern.
+const extensionRejectionLimitExhausted = `{
+    "error": "Request out of policy scope.",
+    "errors": [],
+    "policy": {
+        "name": "Third-Party-Client-Facing",
+        "extensionLimit": 5,
+        "extensionLength": 345600,
+        "isExtendable": false,
+        "extensionMaxDate": "2026-07-27T17:14:00.000Z",
+        "extend": "2026-07-24T17:14:00.000Z",
+        "inPolicy": true,
+        "validation": { "extension": true, "opportunityProduct": true }
+    }
+}`
+
+// extensionRejectionNeverExtendable: reconstructed from the documented table
+// in idea session 4 (raw JSON wasn't captured there, only the table).
+// errors:["Invalid extension date"] + validation.extension:false — the
+// "extensionLimit:0 from creation" pattern. isExtendable:false is the only
+// field the parser depends on, so exact fidelity of the other fields does not
+// affect correctness.
+const extensionRejectionNeverExtendable = `{
+    "error": "...Invalid extension date.",
+    "errors": ["Invalid extension date"],
+    "policy": { "isExtendable": false, "extensionLimit": 0, "validation": { "extension": false } }
+}`
+
+// extensionAmbiguousNoPolicy: no evidence in the idea file for this shape —
+// Taku's own construction (not a captured payload) to exercise the
+// extensionAmbiguous branch when no policy object is present at all.
+const extensionAmbiguousNoPolicy = `{"error":"some other error","errors":["Something else"]}`
+
+// ---------------------------------------------------------------------------
+// TestBuildExtensionPayload
+// ---------------------------------------------------------------------------
+
+func TestBuildExtensionPayload(t *testing.T) {
+	t.Parallel()
+
+	const userEmail = "user@example.com"
+	const reservationID = "res-123"
+	const extensionDate = "2026-07-24T00:00:00.000Z"
+
+	raw, err := buildExtensionPayload(userEmail, reservationID, extensionDate)
+	if err != nil {
+		t.Fatalf("buildExtensionPayload returned error: %v", err)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("buildExtensionPayload output is not valid JSON: %v (body: %s)", err, raw)
+	}
+
+	want := map[string]string{
+		"IBMID":         userEmail,
+		"requestType":   "aws",
+		"extensionDate": extensionDate,
+		"reservationId": reservationID,
+		"id":            reservationID,
+	}
+
+	for k, wantV := range want {
+		gotV, ok := got[k]
+		if !ok {
+			t.Errorf("buildExtensionPayload: key %q absent from payload", k)
+			continue
+		}
+		if gotV != wantV {
+			t.Errorf("buildExtensionPayload: %q = %q, want %q", k, gotV, wantV)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("buildExtensionPayload: payload has %d keys (%v), want exactly %d", len(got), got, len(want))
+	}
+
+	// id MUST duplicate reservationId — confirmed required by the real API
+	// alongside reservationId (spec §3b), not merely "happens to be the same
+	// value because both come from the same input variable."
+	if got["id"] != got["reservationId"] {
+		t.Errorf("buildExtensionPayload: id (%q) must equal reservationId (%q)", got["id"], got["reservationId"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestClassifyExtensionResponse
+// ---------------------------------------------------------------------------
+
+func TestClassifyExtensionResponse(t *testing.T) {
+	t.Parallel()
+
+	type row struct {
+		name   string
+		status int
+		body   string
+		want   extensionOutcome
+	}
+
+	rows := []row{
+		{name: "success_200", status: 200, body: extensionSuccessBody, want: extensionSucceeded},
+		{name: "success_299_upper_boundary", status: 299, body: extensionSuccessBody, want: extensionSucceeded},
+		{name: "not_2xx_300_boundary_is_ambiguous_not_success", status: 300, body: extensionSuccessBody, want: extensionAmbiguous},
+
+		// --- both documented 400 rejection patterns → identical outcome ---
+		{
+			name:   "rejection_limit_exhausted_after_N_uses",
+			status: 400,
+			body:   extensionRejectionLimitExhausted,
+			want:   extensionNotPossible,
+		},
+		{
+			name:   "rejection_never_extendable_extensionLimit_0_from_creation",
+			status: 400,
+			body:   extensionRejectionNeverExtendable,
+			want:   extensionNotPossible,
+		},
+
+		// --- ambiguous: unrecognized shapes / unexpected statuses ---
+		{name: "ambiguous_no_policy_object", status: 400, body: extensionAmbiguousNoPolicy, want: extensionAmbiguous},
+		{name: "ambiguous_malformed_json", status: 400, body: `{not valid json`, want: extensionAmbiguous},
+		{name: "ambiguous_empty_body", status: 400, body: ``, want: extensionAmbiguous},
+		{name: "ambiguous_policy_isExtendable_null", status: 400, body: `{"policy":{"isExtendable":null}}`, want: extensionAmbiguous},
+		{
+			// Boundary/regression coverage (derived directly from the given
+			// `!= nil && !*IsExtendable` logic, not a captured real payload):
+			// isExtendable:true at 400 must NOT be treated as extensionNotPossible.
+			// Catches a `IsExtendable != nil` (missing negation) regression.
+			name:   "ambiguous_policy_isExtendable_true_is_not_notPossible",
+			status: 400,
+			body:   `{"policy":{"isExtendable":true}}`,
+			want:   extensionAmbiguous,
+		},
+		{
+			// Any non-{2xx,400} status is ambiguous regardless of body — even a
+			// body that WOULD parse as a valid rejection at 400.
+			name:   "ambiguous_500_regardless_of_wouldbe_valid_400_body",
+			status: 500,
+			body:   extensionRejectionLimitExhausted,
+			want:   extensionAmbiguous,
+		},
+	}
+
+	for _, tc := range rows {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyExtensionResponse(tc.status, []byte(tc.body))
+			if got != tc.want {
+				t.Errorf("classifyExtensionResponse(%d, %q) = %v, want %v", tc.status, tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// The zero value of extensionOutcome (extensionUnknown) must never be
+	// returned by the function — every branch above resolves to one of the
+	// three named outcomes.
+	t.Run("never_returns_zero_value_extensionUnknown", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range rows {
+			if classifyExtensionResponse(tc.status, []byte(tc.body)) == extensionUnknown {
+				t.Errorf("classifyExtensionResponse(%d, %q) returned the zero-value extensionUnknown — this is always a bug",
+					tc.status, tc.body)
+			}
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// TestExtensionWindowFractionValidator
+//
+// Fixture-construction recipe taken directly from the spec's "Proven
+// test-construction recipe" (already compiled and run by Taku against the
+// real pinned terraform-plugin-framework@v1.19.0 in that session, and
+// independently re-verified again by Shin in this session against a
+// throwaway stand-in implementation before writing this file). Uses a
+// minimal 2-attribute local schema rather than the full
+// reservationResource{}.Schema() — the validator only interacts with these
+// two attributes, and building a full tftypes Object for the entire real
+// schema (nested requester_context, service_links list, template_variables
+// map, ...) would add construction complexity with no bearing on the
+// behavior under test. The spec explicitly permits this adaptation.
+// ---------------------------------------------------------------------------
+
+// extensionValidatorFixtureSchema is the minimal schema used to construct
+// validator.Float64Request fixtures: only the two attributes the validator
+// actually reads.
+func extensionValidatorFixtureSchema() rschema.Schema {
+	return rschema.Schema{
+		Attributes: map[string]rschema.Attribute{
+			"reservation_duration_days": rschema.Int64Attribute{Optional: true, Computed: true},
+			"extension_window_fraction": rschema.Float64Attribute{Optional: true, Computed: true},
+		},
+	}
+}
+
+// newExtensionWindowFractionValidatorRequest builds a validator.Float64Request
+// against extensionValidatorFixtureSchema(). fraction/durationDays == nil
+// means "not set by the user" (null in the raw config) — the trigger for the
+// accepted known-limitation skip when durationDays is nil.
+func newExtensionWindowFractionValidatorRequest(t *testing.T, fraction *float64, durationDays *int64) validator.Float64Request {
+	t.Helper()
+	ctx := context.Background()
+	s := extensionValidatorFixtureSchema()
+
+	durationVal := tftypes.NewValue(tftypes.Number, nil)
+	if durationDays != nil {
+		durationVal = tftypes.NewValue(tftypes.Number, *durationDays)
+	}
+
+	var fractionConfigValue types.Float64
+	fractionVal := tftypes.NewValue(tftypes.Number, nil)
+	if fraction != nil {
+		fractionVal = tftypes.NewValue(tftypes.Number, *fraction)
+		fractionConfigValue = types.Float64Value(*fraction)
+	} else {
+		fractionConfigValue = types.Float64Null()
+	}
+
+	// tftypes.Object requires every declared attribute key present in the
+	// value map, null or not — omitting a key panics ("required attribute
+	// ... not set"). Confirmed by testing (spec's known-limitation section).
+	raw := tftypes.NewValue(s.Type().TerraformType(ctx), map[string]tftypes.Value{
+		"reservation_duration_days": durationVal,
+		"extension_window_fraction": fractionVal,
+	})
+
+	return validator.Float64Request{
+		Path:        path.Root("extension_window_fraction"),
+		Config:      tfsdk.Config{Schema: s, Raw: raw},
+		ConfigValue: fractionConfigValue,
+	}
+}
+
+func f64ptr(v float64) *float64 { return &v }
+func i64ptr(v int64) *int64     { return &v }
+
+func TestExtensionWindowFractionValidator(t *testing.T) {
+	t.Parallel()
+
+	type row struct {
+		name       string
+		fraction   *float64 // nil == unset/null in raw config
+		duration   *int64   // nil == unset/null in raw config
+		wantErr    bool
+		wantDetail string // exact Detail() text, checked only when wantErr
+	}
+
+	rows := []row{
+		// --- 5 pinned rows, spec §3(d) table ---
+		{
+			name:     "row1_invalid_1.5_over_duration_4",
+			fraction: f64ptr(1.5), duration: i64ptr(4),
+			wantErr: true,
+			wantDetail: "extension_window_fraction is 1.5, and reservation_duration_days is 4, so the " +
+				"computed extension window would be 6 days — longer than the reservation's own 4-day " +
+				"duration. extension_window_fraction must be in the range (0, 1] so that " +
+				"extension_window_fraction × reservation_duration_days never exceeds reservation_duration_days.",
+		},
+		{
+			name:     "row2_valid_inclusive_boundary_1.0_over_4",
+			fraction: f64ptr(1.0), duration: i64ptr(4),
+			wantErr: false,
+		},
+		{
+			name:     "row3_valid_default_0.5_over_4",
+			fraction: f64ptr(0.5), duration: i64ptr(4),
+			wantErr: false,
+		},
+		{
+			name:     "row4_valid_degenerate_zero_0.0_over_4",
+			fraction: f64ptr(0.0), duration: i64ptr(4),
+			wantErr: false,
+		},
+		{
+			// KNOWN LIMITATION, accepted by design (spec's dedicated section):
+			// reservation_duration_days unset (null in raw config, relying on
+			// its own schema Default) → validator CANNOT know the resolved
+			// value yet → skips validation entirely, even though 1.5 is out
+			// of spec. This is the pinned, intentional accepted behavior —
+			// NOT a bug to fix. A future refactor that silently starts
+			// erroring here (or, worse, panicking) must surface as a
+			// deliberate discussion, not an unnoticed regression.
+			name:     "row5_known_limitation_1.5_with_duration_unset_is_VALID_by_design",
+			fraction: f64ptr(1.5), duration: nil,
+			wantErr: false,
+		},
+
+		// --- additional coverage beyond the pinned 5, derived directly from
+		// the validator's own first two guard clauses (not invented server/
+		// wire behavior — pure schema/validator logic already fully given in
+		// the spec's code) ---
+		{
+			// The single most common real-world path: user never touches
+			// extension_window_fraction at all, relying on its own Default.
+			name:     "extra_fraction_itself_unset_skips_entirely",
+			fraction: nil, duration: i64ptr(4),
+			wantErr: false,
+		},
+		{
+			// Nonsensical sibling value; validating reservation_duration_days
+			// itself is not this validator's job (InExtensionWindow fails
+			// closed on durationDays<=0 at runtime regardless, spec §1).
+			name:     "extra_duration_zero_is_not_this_validators_job",
+			fraction: f64ptr(1.5), duration: i64ptr(0),
+			wantErr: false,
+		},
+		{
+			name:     "extra_duration_negative_is_not_this_validators_job",
+			fraction: f64ptr(1.5), duration: i64ptr(-5),
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range rows {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := newExtensionWindowFractionValidatorRequest(t, tc.fraction, tc.duration)
+			resp := &validator.Float64Response{}
+
+			extensionWindowFractionValidator{}.ValidateFloat64(context.Background(), req, resp)
+
+			gotErr := resp.Diagnostics.HasError()
+			if gotErr != tc.wantErr {
+				t.Fatalf("ValidateFloat64: HasError() = %v, want %v (diagnostics: %v)", gotErr, tc.wantErr, resp.Diagnostics)
+			}
+			if !tc.wantErr {
+				return
+			}
+			if len(resp.Diagnostics) != 1 {
+				t.Fatalf("ValidateFloat64: expected exactly 1 diagnostic, got %d: %v", len(resp.Diagnostics), resp.Diagnostics)
+			}
+			if gotDetail := resp.Diagnostics[0].Detail(); gotDetail != tc.wantDetail {
+				t.Errorf("ValidateFloat64 error detail mismatch:\n  got:  %q\n  want: %q", gotDetail, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Read() integration — extension-window attempt
+//
+// White-box, direct r.Read(ctx, req, &resp) calls (no full acceptance-test
+// harness / no TF_ACC needed), mirroring
+// resource_reservation_delete_unit_test.go's existing convention for
+// integration-testing a single resource method against a controllable
+// in-process httptest.Server.
+// ---------------------------------------------------------------------------
+
+// extensionReadFixture is a minimal, purpose-built in-process mock serving
+// exactly the two endpoints the Read()-integration tests below need:
+//
+//	GET  /api/reservation/aws/<id>  — canonical read (fixed response)
+//	POST /api/reservation/aws/<id>  — extension attempt (fixed response)
+//
+// Deliberately NOT reusing testutil_mock_server_test.go's mockTechZoneServer:
+// that shared fixture has no POST-with-id handler yet (only POST
+// /api/reservation/aws without an id, for Create), and extending a fixture
+// shared by ~10 other test files is a larger, riskier surface than a small
+// self-contained server scoped to exactly this new file — consistent with
+// buildReservationResource's own existing per-file httptest.Server pattern.
+type extensionReadFixture struct {
+	t *testing.T
+
+	mu sync.Mutex
+
+	getStatus int
+	getBody   string
+
+	postStatus int
+	postBody   string
+
+	postCallCount int
+	getCallCount  int
+	lastPostBody  []byte
+}
+
+func newExtensionReadFixture(t *testing.T, getStatus int, getBody string, postStatus int, postBody string) *extensionReadFixture {
+	t.Helper()
+	return &extensionReadFixture{
+		t: t, getStatus: getStatus, getBody: getBody, postStatus: postStatus, postBody: postBody,
+	}
+}
+
+// Server starts the httptest.Server and registers cleanup.
+func (f *extensionReadFixture) Server() *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(f.serveHTTP))
+	f.t.Cleanup(srv.Close)
+	return srv
+}
+
+func (f *extensionReadFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/reservation/aws/"):
+		f.mu.Lock()
+		f.getCallCount++
+		status, body := f.getStatus, f.getBody
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/reservation/aws/"):
+		raw, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.postCallCount++
+		f.lastPostBody = raw
+		status, body := f.postStatus, f.postBody
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+
+	default:
+		f.t.Logf("extensionReadFixture: unexpected request %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}
+}
+
+func (f *extensionReadFixture) PostCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.postCallCount
+}
+
+func (f *extensionReadFixture) GetCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getCallCount
+}
+
+func (f *extensionReadFixture) LastPostBody() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastPostBody
+}
+
+// canonicalReadBody renders a GET /api/reservation/aws/<id> response body
+// with the given status/provisionUntil/extendCount.
+func canonicalReadBody(status, provisionUntil string, extendCount int64) string {
+	return fmt.Sprintf(`{
+		"id": "ext-res-1",
+		"status": %q,
+		"serviceLinks": [],
+		"provisionDate": "2026-07-01T00:00:00Z",
+		"provisionUntil": %q,
+		"extendCount": %d
+	}`, status, provisionUntil, extendCount)
+}
+
+// buildExtensionTestResource constructs a reservationResource wired to
+// srvURL with an injected (fixed, non-time.Now) clock — required for
+// deterministic window-eligibility assertions.
+func buildExtensionTestResource(t *testing.T, srvURL string, nowFn func() time.Time) *reservationResource {
+	t.Helper()
+	client, err := techzone.NewClient(srvURL, sentinelTokenInternal)
+	if err != nil {
+		t.Fatalf("NewClient(%s): %v", srvURL, err)
+	}
+	return &reservationResource{
+		pd:  &providerData{Client: client},
+		now: nowFn,
+	}
+}
+
+// buildExtensionTestState builds a tfsdk.State populated with a reservationModel
+// carrying the given reservationID/durationDays/windowFraction/extendCount/endDate.
+// Structurally mirrors buildDeleteState (same package, resource_reservation_delete_unit_test.go)
+// with the two new extension-window fields added.
+func buildExtensionTestState(t *testing.T, s rschema.Schema, reservationID string, durationDays int64, windowFraction float64, extendCount int64, endDate string) tfsdk.State {
+	t.Helper()
+	ctx := context.Background()
+
+	rawType := s.Type().TerraformType(ctx)
+	state := tfsdk.State{Schema: s, Raw: tftypes.NewValue(rawType, nil)}
+
+	emptyLinks, diags := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: serviceLinkAttrTypes}, []ServiceLinkModel{})
+	if diags.HasError() {
+		t.Fatalf("building empty service_links: %v", diags)
+	}
+
+	dynMap, dynDiags := types.MapValue(types.StringType, map[string]attr.Value{
+		"_04_hcp_org":     types.StringValue("test-hcp-org"),
+		"_05_hcp_project": types.StringValue("test-hcp-project"),
+	})
+	if dynDiags.HasError() {
+		t.Fatalf("building template_variables map: %v", dynDiags)
+	}
+
+	rcAttrTypes := map[string]attr.Type{
+		"opportunity": types.ListType{ElemType: types.StringType},
+		"iui":         types.StringType,
+	}
+	nullRC := types.ObjectNull(rcAttrTypes)
+
+	m := reservationModel{
+		TemplateVariables:       dynMap,
+		Region:                  types.StringValue("us-east-2"),
+		ReservationName:         types.StringValue("Reservation Name"),
+		Purpose:                 types.StringValue("Demo"),
+		CollectionID:            types.StringValue("test-collection-id"),
+		UserEmail:               types.StringValue("test@example.com"),
+		RequesterContext:        nullRC,
+		ReservationDurationDays: types.Int64Value(durationDays),
+		TimeoutMinutes:          types.Int64Value(30),
+		ExtensionWindowFraction: types.Float64Value(windowFraction), // NEW field — spec §3d
+		ID:                      types.StringValue(reservationID),
+		Status:                  types.StringValue("Ready"),
+		ServiceLinks:            emptyLinks,
+		StartDate:               types.StringValue("2026-07-01T00:00:00Z"),
+		EndDate:                 types.StringValue(endDate),
+		ExtendCount:             types.Int64Value(extendCount), // NEW field — spec §4
+	}
+
+	if diags := state.Set(ctx, m); diags.HasError() {
+		t.Fatalf("state.Set() failed: %v", diags)
+	}
+	return state
+}
+
+// captureTFLogWarnings runs fn with a tflog context wired to an in-memory
+// buffer and returns every log entry with @level=="warn". Mirrors
+// tflog_sentinel_test.go's existing tflogtest.RootLogger convention.
+func captureTFLogWarnings(t *testing.T, fn func(ctx context.Context)) []map[string]interface{} {
+	t.Helper()
+	var buf bytes.Buffer
+	ctx := tflogtest.RootLogger(context.Background(), &buf)
+
+	fn(ctx)
+
+	entries, err := tflogtest.MultilineJSONDecode(&buf)
+	if err != nil {
+		t.Logf("captureTFLogWarnings: MultilineJSONDecode: %v (may be empty log)", err)
+		return nil
+	}
+	var warns []map[string]interface{}
+	for _, e := range entries {
+		if lvl, _ := e["@level"].(string); lvl == "warn" {
+			warns = append(warns, e)
+		}
+	}
+	return warns
+}
+
+// fixedNowForExtensionTests is the reference "now" for every Read()-integration
+// scenario below: 2026-07-20T12:00:00Z. Independently verified via Go's own
+// time package in this session (never hand-calculated, per plan README
+// Decision D5): combined with provisionUntil = fixedNow-1h and
+// durationDays=4/fraction=0.5, InExtensionWindow returns (true,true) AND
+// PastExpiry (the pre-existing, unrelated check) ALSO returns true for the
+// same provisionUntil — proving the reservation would have been PRUNED under
+// the pre-extension-window code path, but a non-terminal status + successful
+// extension intercepts it first (spec §5's exact insertion-point contract).
+func fixedNowForExtensionTests() time.Time {
+	return time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+}
+
+const extensionTestDurationDays = int64(4)
+const extensionTestWindowFraction = 0.5 // default
+
+// provisionUntilInsideWindow: fixedNow - 1h. Independently verified (this
+// session): InExtensionWindow(provisionUntilInsideWindow, fixedNow, 4, 0.5) ==
+// (true, true); PastExpiry(provisionUntilInsideWindow, fixedNow) == true.
+const provisionUntilInsideWindow = "2026-07-20T11:00:00Z"
+
+// wantNextExtensionDate: NextExtensionDate(provisionUntilInsideWindow, 4).
+// Independently verified via Go's time package (this session):
+// time.Date(2026,7,20,11,0,0,0,UTC).Add(4*24h).Format("2006-01-02T15:04:05.000Z").
+const wantNextExtensionDate = "2026-07-24T11:00:00.000Z"
+
+// provisionUntilFarFuture: fixedNow + 365 days — well outside the window
+// regardless of fraction, exercising the routine "not yet eligible" majority
+// case (no extension attempt at all).
+const provisionUntilFarFuture = "2027-07-20T12:00:00Z"
+
+// TestReadUnit_Extension_Succeeds_UpdatesState: extension succeeds → state
+// updated (end_date advances, extend_count increments), early return skips
+// PastExpiry, exactly one POST sent with the correct payload shape.
+func TestReadUnit_Extension_Succeeds_UpdatesState(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(2)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+		http.StatusOK, extensionSuccessBody,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Read(): resource was removed from state, want it preserved (extension succeeded)")
+	}
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 1", got)
+	}
+	if got := fx.GetCallCount(); got != 1 {
+		t.Errorf("Read(): canonical GET called %d times, want exactly 1 (Read() has no poll/retry loop, unlike Create())", got)
+	}
+
+	var got reservationModel
+	if diags := resp.State.Get(context.Background(), &got); diags.HasError() {
+		t.Fatalf("resp.State.Get(): %v", diags)
+	}
+	if got.EndDate.ValueString() != wantNextExtensionDate {
+		t.Errorf("end_date after successful extension = %q, want %q", got.EndDate.ValueString(), wantNextExtensionDate)
+	}
+	if want := initialExtendCount + 1; got.ExtendCount.ValueInt64() != want {
+		t.Errorf("extend_count after successful extension = %d, want %d", got.ExtendCount.ValueInt64(), want)
+	}
+	if got.ID.ValueString() != reservationID {
+		t.Errorf("id after successful extension = %q, want %q (must be preserved)", got.ID.ValueString(), reservationID)
+	}
+
+	// Cross-validate the actual wire body sent end-to-end (not just the pure
+	// buildExtensionPayload unit test) — proves Read() wired the builder
+	// correctly with the real computed extensionDate and state values.
+	var sentPayload map[string]string
+	if err := json.Unmarshal(fx.LastPostBody(), &sentPayload); err != nil {
+		t.Fatalf("extension POST body is not valid JSON: %v (body: %s)", err, fx.LastPostBody())
+	}
+	if sentPayload["extensionDate"] != wantNextExtensionDate {
+		t.Errorf("sent extensionDate = %q, want %q", sentPayload["extensionDate"], wantNextExtensionDate)
+	}
+	if sentPayload["reservationId"] != reservationID || sentPayload["id"] != reservationID {
+		t.Errorf("sent reservationId/id = %q/%q, want both %q", sentPayload["reservationId"], sentPayload["id"], reservationID)
+	}
+	if sentPayload["IBMID"] != "test@example.com" {
+		t.Errorf("sent IBMID = %q, want %q", sentPayload["IBMID"], "test@example.com")
+	}
+	if sentPayload["requestType"] != "aws" {
+		t.Errorf("sent requestType = %q, want %q", sentPayload["requestType"], "aws")
+	}
+}
+
+// runExtensionRejectionFallsThroughTest is the shared body for both 400
+// rejection patterns: extension is attempted (eligible), rejected, and MUST
+// fall through unchanged to the existing PastExpiry prune — WITHOUT ever
+// raising a blocking Diagnostics error.
+func runExtensionRejectionFallsThroughTest(t *testing.T, rejectionBody string) {
+	t.Helper()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(5)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+		http.StatusBadRequest, rejectionBody,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): a rejected extension attempt must NEVER raise a blocking error, got: %v", resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 1", got)
+	}
+	// provisionUntilInsideWindow is strictly before fixedNow (verified this
+	// session) — the existing, unchanged PastExpiry check must prune it once
+	// the extension attempt falls through.
+	if !resp.State.Raw.IsNull() {
+		t.Error("Read(): rejected extension must fall through to the existing PastExpiry prune — resource should have been removed from state, but it was not")
+	}
+}
+
+// TestReadUnit_Extension_RejectedLimitExhausted_FallsThroughToPrune: the
+// "used up the allotted extensions" 400 pattern.
+func TestReadUnit_Extension_RejectedLimitExhausted_FallsThroughToPrune(t *testing.T) {
+	t.Parallel()
+	runExtensionRejectionFallsThroughTest(t, extensionRejectionLimitExhausted)
+}
+
+// TestReadUnit_Extension_RejectedNeverExtendable_FallsThroughToPrune: the
+// "extensionLimit:0 from creation" 400 pattern — proves BOTH documented
+// rejection patterns collapse to the identical outcome via policy.isExtendable
+// alone, ignoring errors[]/error text (spec §3c).
+func TestReadUnit_Extension_RejectedNeverExtendable_FallsThroughToPrune(t *testing.T) {
+	t.Parallel()
+	runExtensionRejectionFallsThroughTest(t, extensionRejectionNeverExtendable)
+}
+
+// TestReadUnit_Extension_AmbiguousResponse_FallsThroughToPrune_LogsWarn:
+// an unrecognized POST response (500, no usable body) must ALSO fall through
+// without blocking — AND must be observable via tflog.Warn (the concrete fix
+// for the fail-silent-to-KEEP pattern; an unrecognized shape must never be
+// silently equivalent to a clean, confirmed rejection).
+func TestReadUnit_Extension_AmbiguousResponse_FallsThroughToPrune_LogsWarn(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(0)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+		http.StatusInternalServerError, `{"error":"internal server error"}`,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+
+	warns := captureTFLogWarnings(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): an ambiguous extension response must NEVER raise a blocking error, got: %v", resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 1 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 1", got)
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("Read(): ambiguous extension response must fall through to the existing PastExpiry prune, but resource was not removed")
+	}
+	if len(warns) == 0 {
+		t.Error("Read(): an ambiguous/unrecognized extension response MUST be logged at tflog.Warn — " +
+			"this is the concrete fix for the fail-silent-to-KEEP pattern (gotchas/ibm-techzone.md); " +
+			"silence here reproduces exactly the class of bug this plan exists to close")
+	}
+}
+
+// TestReadUnit_Extension_NotYetEligible_NoAttemptMade: the routine, most
+// common outcome — provisionUntil far in the future, well outside the
+// window. No extension attempt (no POST at all); normal Read() proceeds
+// unchanged.
+func TestReadUnit_Extension_NotYetEligible_NoAttemptMade(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(0)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilFarFuture, initialExtendCount),
+		http.StatusOK, extensionSuccessBody, // must never be hit
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilFarFuture)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 0 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 0 (not yet eligible — the routine majority case must never attempt extension)", got)
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Read(): resource must not be removed — provisionUntil is far in the future")
+	}
+
+	var got reservationModel
+	if diags := resp.State.Get(context.Background(), &got); diags.HasError() {
+		t.Fatalf("resp.State.Get(): %v", diags)
+	}
+	if got.EndDate.ValueString() != provisionUntilFarFuture {
+		t.Errorf("end_date = %q, want unchanged %q (no extension attempted)", got.EndDate.ValueString(), provisionUntilFarFuture)
+	}
+	if got.ExtendCount.ValueInt64() != initialExtendCount {
+		t.Errorf("extend_count = %d, want unchanged %d", got.ExtendCount.ValueInt64(), initialExtendCount)
+	}
+}
+
+// TestReadUnit_Extension_CannotDetermineEligibility_SkipsAttempt_LogsWarn:
+// an unparseable provisionUntil in the API response (e.g. JSON null) means
+// InExtensionWindow returns ok=false ("cannot determine") — extension is
+// skipped (no POST), and this MUST be observable via tflog.Warn, never
+// silent. Falls through to the existing (unchanged) PastExpiry, which ALSO
+// cannot determine and therefore KEEPs (matches the pre-existing,
+// independently-fixed fail-closed contract from Phase A).
+func TestReadUnit_Extension_CannotDetermineEligibility_SkipsAttempt_LogsWarn(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(0)
+	const unparseableProvisionUntil = "" // decoded from JSON null via derefString
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", unparseableProvisionUntil, initialExtendCount),
+		http.StatusOK, extensionSuccessBody, // must never be hit
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, unparseableProvisionUntil)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+
+	warns := captureTFLogWarnings(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+	}
+	if got := fx.PostCallCount(); got != 0 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 0 (eligibility could not be determined)", got)
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Read(): resource must not be removed — PastExpiry also cannot determine (unparseable provisionUntil) and therefore KEEPs, per the existing fail-closed contract")
+	}
+	if len(warns) == 0 {
+		t.Error("Read(): 'cannot determine extension eligibility' MUST be logged at tflog.Warn — " +
+			"this is the deliberate mitigation for the fail-silent-to-KEEP pattern " +
+			"(gotchas/ibm-techzone.md); silently skipping here with no log reproduces exactly " +
+			"the class of bug this plan exists to close")
+	}
+}
