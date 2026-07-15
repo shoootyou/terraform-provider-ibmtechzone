@@ -1140,6 +1140,89 @@ func TestReadUnit_Extension_POST302_BodyPreviewRedacted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// r2 finding 1 (audit round 2, HIGH) — the 401/403/302 body_preview
+// redaction guard fixed in round 1 (above) for the extension-POST's
+// succeeded/ambiguous branches was NOT retrofitted to 3 sibling call sites
+// sharing the same risk pattern and endpoint base: Create()'s poll loop and
+// Final GET (see resource_reservation_create_redaction_test.go), and
+// Read()'s own initial GET (this test) — the most severe of the three,
+// because a 302 there previously fell through to the generic non-2xx
+// branch, which embeds the FULL raw body (up to 512 bytes) directly into
+// resp.Diagnostics — a channel always visible to the user on every
+// plan/apply/refresh, no TF_LOG required (unlike the tflog.Warn channel the
+// other two call sites use).
+// ---------------------------------------------------------------------------
+
+// TestReadUnit_InitialGET302_BodyNotLeakedToDiagnostics: a 302 on Read()'s
+// own initial canonical GET (BEFORE the extension-window attempt is ever
+// reached) must route to the same auth-failure branch as 401/403 — a static
+// canned message, no body content — instead of falling through to the
+// generic non-2xx branch, which would leak the raw body (potential SSO
+// redirect HTML or session metadata) into resp.Diagnostics.
+func TestReadUnit_InitialGET302_BodyNotLeakedToDiagnostics(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+
+	sentinelBody := fmt.Sprintf(`<html><body>Sign in to IBM — session %s</body></html>`, extensionSentinelBodyValue)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusFound, sentinelBody,
+		http.StatusOK, extensionSuccessBody, // must never be reached — Read() returns on the initial GET's auth failure, before any extension attempt
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, 0, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+
+	entries := captureAllTFLogEntries(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Read(): a 302 on the initial GET must raise an auth-failure error, got none")
+	}
+	if got := fx.PostCallCount(); got != 0 {
+		t.Errorf("Read(): extension POST called %d times, want exactly 0 — Read() must return "+
+			"immediately on the initial GET's auth failure, before ever reaching the extension attempt", got)
+	}
+
+	// r2 finding 1's core assertion: the sentinel must not leak into
+	// Diagnostics — the channel this finding is actually about. Before the
+	// fix, httpStatus==302 fell through to the generic non-2xx branch, which
+	// embeds truncate(body, 512) directly into AddError.
+	var allMsgs strings.Builder
+	for _, d := range resp.Diagnostics {
+		allMsgs.WriteString(d.Summary())
+		allMsgs.WriteString(" ")
+		allMsgs.WriteString(d.Detail())
+		allMsgs.WriteString(" ")
+	}
+	if combined := allMsgs.String(); strings.Contains(combined, extensionSentinelBodyValue) {
+		t.Errorf("r2 finding 1: Read()'s initial-GET 302 leaked the response body sentinel into "+
+			"Diagnostics — the 401/403/302 guard must route 302 to the canned auth-failure message, "+
+			"never the generic non-2xx branch that embeds the raw body: %q", combined)
+	}
+
+	// Belt-and-suspenders: this path emits no tflog calls today (the
+	// auth-failure branch uses only a static canned message), so entries
+	// should be empty — scanning explicitly rather than assuming it, in case
+	// that ever changes, mirroring this file's established sentinel-scan
+	// convention.
+	for i, e := range entries {
+		for k, v := range e {
+			if strings.Contains(fmt.Sprintf("%v", v), extensionSentinelBodyValue) {
+				t.Errorf("r2 finding 1: log entry %d field %q leaked the initial-GET 302 body "+
+					"sentinel: %v", i, k, v)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Hallazgo 5 (audit round 1, MEDIUM) — observability symmetry: the
 // extensionSucceeded branch's "Reservation extended" log entry now includes
 // body_preview (previously only new_provision_until).

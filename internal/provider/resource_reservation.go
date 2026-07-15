@@ -699,14 +699,15 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 			continue
 		}
 		if pollStatus < 200 || pollStatus >= 300 {
-			// Suppress body_preview at 401/403: auth-rejection bodies may reflect
-			// credential material. Log only the status code for these cases.
+			// Suppress body_preview at 401/403/302 (r2 finding 1): auth-rejection
+			// bodies may reflect credential material or SSO redirect HTML. Log
+			// only the status code for these cases.
 			logFields := map[string]any{
 				"reservation_id": reservationID,
 				"attempt":        attempt,
 				"http_status":    pollStatus,
 			}
-			if pollStatus != 401 && pollStatus != 403 {
+			if pollStatus != 401 && pollStatus != 403 && pollStatus != 302 {
 				logFields["body_preview"] = truncate(pollBody, 200)
 			}
 			tflog.Warn(ctx, "Poll returned non-2xx status, retrying", logFields)
@@ -783,14 +784,15 @@ pollDone:
 			continue
 		}
 		if canStatus < 200 || canStatus >= 300 {
-			// Suppress body_preview at 401/403 — same guard as the poll loop above.
-			// Auth-rejection bodies may contain SSO redirect HTML or session metadata.
+			// Suppress body_preview at 401/403/302 (r2 finding 1) — same guard
+			// as the poll loop above. Auth-rejection bodies may contain SSO
+			// redirect HTML or session metadata.
 			finalLogFields := map[string]any{
 				"reservation_id": reservationID,
 				"attempt":        attempt,
 				"http_status":    canStatus,
 			}
-			if canStatus != 401 && canStatus != 403 {
+			if canStatus != 401 && canStatus != 403 && canStatus != 302 {
 				finalLogFields["body_preview"] = truncate(canBody, 200)
 			}
 			tflog.Warn(ctx, "Final GET returned non-2xx status, retrying", finalLogFields)
@@ -876,9 +878,13 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	// 401/403 → auth failure — suppress body to avoid leaking SSO redirect HTML.
-	// Same guard as the poll loop, Final GET, and Delete paths (Ei R2 NF-01).
-	if httpStatus == 401 || httpStatus == 403 {
+	// 401/403/302 → auth failure — suppress body to avoid leaking SSO redirect
+	// HTML. Same guard as the poll loop, Final GET, and Delete paths (r2
+	// finding 1 — this branch previously omitted 302, which fell through to
+	// the generic non-2xx branch below and leaked the full response body,
+	// up to 512 bytes, directly into resp.Diagnostics — a channel always
+	// visible to the user on every plan/apply/refresh, no TF_LOG required).
+	if httpStatus == 401 || httpStatus == 403 || httpStatus == 302 {
 		resp.Diagnostics.AddError(
 			"TECHZONE_API_KEY is invalid or expired",
 			"TECHZONE_API_KEY is invalid or expired. Refresh it at https://techzone.ibm.com and re-run.",
