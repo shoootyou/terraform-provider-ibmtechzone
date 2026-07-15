@@ -1,6 +1,9 @@
 package techzone
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // DefaultExtensionWindowFraction is the fraction (0, 1] of the reservation's
 // original duration, counted backward from provisionUntil, during which an
@@ -28,8 +31,13 @@ const DefaultExtensionWindowFraction = 0.5
 //     eligible" so the caller can log this case instead of silently treating
 //     it as equivalent to the routine not-yet-eligible outcome (see
 //     gotchas/ibm-techzone.md, fail-silent-to-KEEP finding).
-//   - Otherwise: windowStart = ToEpoch(provisionUntil) - windowFraction*durationDays*86400 (truncated
-//     to int64 seconds); eligible = now.Unix() >= windowStart (inclusive lower
+//   - Otherwise: windowStart = ToEpoch(provisionUntil) - round(windowFraction*durationDays*86400)
+//     (rounded, not truncated, to the nearest int64 second — see Ei/Sho
+//     audit round 1 finding #4: truncating a float64 not exactly
+//     representable in binary (e.g. 0.3, 0.7, 0.9) lands a fraction of a
+//     second below the mathematically exact integer, which a strict-integer
+//     boundary comparison then treats as "not yet eligible" one second early);
+//     eligible = now.Unix() >= windowStart (inclusive lower
 //     bound, no upper bound). Returns (eligible, true).
 //   - Never calls time.Now() internally (now is always injected — mirrors
 //     PastExpiry's existing contract, required for deterministic tests).
@@ -46,7 +54,18 @@ func InExtensionWindow(provisionUntil string, now time.Time, durationDays int64,
 	if !parsed {
 		return false, false
 	}
-	windowSeconds := int64(windowFraction * float64(durationDays) * 24 * 60 * 60)
+	// Round to the nearest second rather than truncating (audit finding #4):
+	// windowFraction*durationDays*24*60*60 is a float64 product that, for
+	// fractions not exactly representable in binary (0.1, 0.3, 0.7, 0.9, ...),
+	// lands a hair below the mathematically exact integer (e.g.
+	// 0.3*1*86400 == 25919.999999999996, not 25920.0). int64() truncation
+	// would silently drop that last second, moving windowStart one second
+	// later than the contract requires — exactly the boundary the inclusive
+	// "now >= windowStart" check depends on. math.Round recovers the exact
+	// intended integer for every fraction, and is a no-op for the exactly
+	// representable fractions already pinned in extension_window_test.go
+	// (0.0, 0.25, 0.5).
+	windowSeconds := int64(math.Round(windowFraction * float64(durationDays) * 24 * 60 * 60))
 	return now.Unix() >= epoch-windowSeconds, true
 }
 

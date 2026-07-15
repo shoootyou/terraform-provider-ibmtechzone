@@ -232,6 +232,38 @@ func TestInExtensionWindow(t *testing.T) {
 			wantOK:         true,
 		},
 
+		// --- fraction=0.3 (audit round-1 finding #4 — float truncation):
+		// 0.3 is not exactly representable in binary float64, so
+		// windowFraction*durationDays*86400 lands a hair below the exact
+		// integer (25919.999999999996, not 25920.0, for durationDays=1).
+		// Truncating (the pre-fix behavior) silently drops that fraction of
+		// a second, moving windowStart ONE SECOND LATER than the contract's
+		// inclusive-lower-bound requires — at exactly this boundary, the
+		// pre-fix code incorrectly returned eligible=false. Fixed via
+		// math.Round. windowStart epoch independently verified via Go's own
+		// math.Round + time package in this environment (never
+		// hand-calculated, per plan README Decision D5):
+		// provisionUntilEpoch(1784505600) - round(0.3*1*86400) (round(25919.999999999996)=25920)
+		// == 1784479680 ("2026-07-19T16:48:00Z"). ---
+		{
+			name:           "fraction_0.3_float_rounding_at_windowStart_eligible",
+			provisionUntil: provisionUntilISO,
+			now:            time.Unix(provisionUntilEpoch-25920, 0).UTC(), // == correctly-rounded windowStart
+			durationDays:   1,
+			windowFraction: 0.3,
+			wantEligible:   true,
+			wantOK:         true,
+		},
+		{
+			name:           "fraction_0.3_float_rounding_1s_before_windowStart_notEligible",
+			provisionUntil: provisionUntilISO,
+			now:            time.Unix(provisionUntilEpoch-25920-1, 0).UTC(),
+			durationDays:   1,
+			windowFraction: 0.3,
+			wantEligible:   false,
+			wantOK:         true,
+		},
+
 		// --- space-separated regression: identical (eligible, ok) to the RFC3339
 		// default-fraction case above, using TechZone's real wire format ---
 		{
