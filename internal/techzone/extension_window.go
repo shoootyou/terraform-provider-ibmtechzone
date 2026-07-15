@@ -32,7 +32,7 @@ const DefaultExtensionWindowFraction = 0.5
 //     it as equivalent to the routine not-yet-eligible outcome (see
 //     gotchas/ibm-techzone.md, fail-silent-to-KEEP finding).
 //   - Otherwise: windowStart = ToEpoch(provisionUntil) - round(windowFraction*durationDays*86400)
-//     (rounded, not truncated, to the nearest int64 second — see Ei/Sho
+//     (rounded, not truncated, to the nearest int64 second — see Sho
 //     audit round 1 finding #4: truncating a float64 not exactly
 //     representable in binary (e.g. 0.3, 0.7, 0.9) lands a fraction of a
 //     second below the mathematically exact integer, which a strict-integer

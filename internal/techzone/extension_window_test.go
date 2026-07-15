@@ -7,10 +7,11 @@
 //     "not eligible" so the caller (Read()) can log this instead of silently
 //     treating it as the routine not-yet-eligible outcome.
 //   - provisionUntil unparseable via ToEpoch → (false, false).
-//   - Otherwise: windowSeconds = int64(windowFraction * float64(durationDays) * 86400)
-//     (truncated to int64 seconds); windowStart = ToEpoch(provisionUntil) - windowSeconds;
-//     eligible = now.Unix() >= windowStart (inclusive lower bound, no upper bound).
-//     Returns (eligible, true).
+//   - Otherwise: windowSeconds = int64(math.Round(windowFraction * float64(durationDays) * 86400))
+//     — rounded (math.Round), not truncated, to the nearest int64 second (see
+//     @edge-cases below for the boundary this rounding fixes); windowStart =
+//     ToEpoch(provisionUntil) - windowSeconds; eligible = now.Unix() >= windowStart
+//     (inclusive lower bound, no upper bound). Returns (eligible, true).
 //   - No upper bound: once now is at/after windowStart, eligible stays true no
 //     matter how far past provisionUntil now advances.
 //   - Never calls time.Now() internally — now is always caller-injected (mirrors
@@ -42,6 +43,17 @@
 //     windowStart == provisionUntil epoch itself. now == provisionUntil epoch → true;
 //     now == provisionUntil epoch - 1s → false.
 //   - No-upper-bound: now 100 days after provisionUntil (default fraction) → (true, true).
+//   - Float-rounding boundary: fraction=0.3, durationDays=1 — 0.3 is not exactly
+//     representable in binary float64, so windowFraction*float64(durationDays)*86400
+//     == 25919.999999999996, not the mathematically exact 25920.0. math.Round
+//     corrects this to 25920 before use (the pre-fix code used int64() truncation,
+//     which silently kept 25919 — one second short — moving windowStart one second
+//     LATER than the contract requires and making the inclusive-lower-bound check
+//     wrongly return false at the true boundary; this is the exact case that
+//     exposed the original truncation bug). windowStart = provisionUntilEpoch -
+//     round(25919.999999999996) = provisionUntilEpoch - 25920:
+//     now == provisionUntilEpoch-25920   → (true, true)
+//     now == provisionUntilEpoch-25920-1 → (false, true)
 //
 // @interface NextExtensionDate(provisionUntil string, durationDays int64) (string, bool)
 //
