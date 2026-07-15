@@ -1704,3 +1704,113 @@ func TestReadUnit_Extension_CannotDetermineEligibility_SkipsAttempt_LogsWarn(t *
 			"the class of bug this plan exists to close")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// r3 audit finding 6 (round 3, MEDIUM) — every Read()-integration test above
+// uses the identical fixed pair (extensionTestDurationDays=4,
+// extensionTestWindowFraction=0.5 — 0.5 is literally
+// techzone.DefaultExtensionWindowFraction), never varying either value. This
+// cannot distinguish "Read() genuinely reads durationDays/windowFraction
+// from state" from "these two parameters are coincidentally hardcoded
+// somewhere and happen to match the constants used everywhere else" — the
+// same bug class r1's HIGH #2 already fixed elsewhere, never applied to
+// these two parameters at the Read()-integration level.
+// ---------------------------------------------------------------------------
+
+// nonDefaultDurationDays / nonDefaultWindowFraction: deliberately BOTH
+// different from extensionTestDurationDays(4)/extensionTestWindowFraction(0.5)
+// used everywhere else in this file. windowFraction=1.0 is also the
+// validator's own inclusive upper boundary (a case separately flagged as a
+// dedicated-test-coverage gap for InExtensionWindow itself in
+// extension_window_test.go — this Read()-integration test is a distinct,
+// additional angle: proving Read() passes THIS value through, not that the
+// boundary itself is correct).
+const nonDefaultDurationDays = int64(7)
+const nonDefaultWindowFraction = 1.0
+
+// provisionUntilNonDefaultInsideWindow: fixedNow + 3 days. Independently
+// verified via Go's own math/time packages in this environment (never
+// hand-calculated, per plan README Decision D5's discipline): windowSeconds
+// = round(1.0*7*86400) = 604800s (7 days); windowStart = provisionUntilEpoch
+// - 604800 = fixedNow - 4 days ("2026-07-16T12:00:00Z"); since fixedNow
+// (2026-07-20T12:00:00Z) >= windowStart, InExtensionWindow returns
+// eligible=true for the CORRECT (durationDays=7, fraction=1.0) pair.
+//
+// Discriminator check (the actual point of this test): with the WRONG
+// values instead — the extensionTestDurationDays(4)/extensionTestWindowFraction(0.5)
+// pair used everywhere else in this file — windowSeconds would instead be
+// round(0.5*4*86400) = 172800s (2 days), giving windowStart =
+// provisionUntilEpoch - 172800 = fixedNow + 1 day, which is AFTER fixedNow —
+// eligible would incorrectly be FALSE. A Read() that silently hardcoded or
+// mis-wired durationDays/windowFraction to the default pair instead of
+// reading them from state would therefore attempt ZERO extension POSTs here
+// instead of the expected one — precisely the wiring bug this finding
+// targets, made observable via PostCallCount().
+const provisionUntilNonDefaultInsideWindow = "2026-07-23T12:00:00Z"
+
+// wantNextExtensionDateNonDefault: NextExtensionDate(provisionUntilNonDefaultInsideWindow, 7).
+// Independently verified via Go's time package (this session):
+// time.Date(2026,7,23,12,0,0,0,UTC).Add(7*24h) == 2026-07-30T12:00:00.000Z.
+const wantNextExtensionDateNonDefault = "2026-07-30T12:00:00.000Z"
+
+// TestReadUnit_Extension_Succeeds_NonDefaultDurationAndWindowFraction: same
+// shape as TestReadUnit_Extension_Succeeds_UpdatesState, but with BOTH
+// durationDays and windowFraction set to values that differ from the
+// default/fixed pair used by every other Read()-integration test in this
+// file — proving Read() genuinely reads both from state rather than from a
+// hardcoded stand-in (see the discriminator arithmetic in the constants'
+// doc comments above).
+func TestReadUnit_Extension_Succeeds_NonDefaultDurationAndWindowFraction(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(5)
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilNonDefaultInsideWindow, initialExtendCount),
+		http.StatusOK, extensionSuccessBody,
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, nonDefaultDurationDays, nonDefaultWindowFraction, initialExtendCount, provisionUntilNonDefaultInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+	r.Read(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+	}
+
+	// The core discriminator assertion: exactly 1 POST. If Read() silently
+	// used the default (4, 0.5) pair instead of state's real (7, 1.0)
+	// values, InExtensionWindow would return eligible=false for this exact
+	// provisionUntil (see the constant's doc comment above) and NO POST
+	// would ever be sent.
+	if got := fx.PostCallCount(); got != 1 {
+		t.Fatalf("Read(): extension POST called %d times, want exactly 1 — a count of 0 here would mean "+
+			"Read() is not genuinely reading durationDays=%d/windowFraction=%v from state (r3 audit "+
+			"finding 6): those exact non-default values are REQUIRED to make this reservation eligible; "+
+			"the default pair (durationDays=4/windowFraction=0.5) would NOT be eligible for the same "+
+			"provisionUntil", got, nonDefaultDurationDays, nonDefaultWindowFraction)
+	}
+
+	if resp.State.Raw.IsNull() {
+		t.Fatal("Read(): resource must not be removed — extension succeeded, so PastExpiry is skipped entirely")
+	}
+
+	var got reservationModel
+	if diags := resp.State.Get(context.Background(), &got); diags.HasError() {
+		t.Fatalf("resp.State.Get(): %v", diags)
+	}
+	if got.EndDate.ValueString() != wantNextExtensionDateNonDefault {
+		t.Errorf("end_date after successful non-default extension = %q, want %q (NextExtensionDate("+
+			"%q, %d) — proves the SAME non-default durationDays also reaches NextExtensionDate, not "+
+			"just InExtensionWindow)",
+			got.EndDate.ValueString(), wantNextExtensionDateNonDefault, provisionUntilNonDefaultInsideWindow, nonDefaultDurationDays)
+	}
+	if got.ExtendCount.ValueInt64() != initialExtendCount+1 {
+		t.Errorf("extend_count after successful extension = %d, want %d", got.ExtendCount.ValueInt64(), initialExtendCount+1)
+	}
+}
