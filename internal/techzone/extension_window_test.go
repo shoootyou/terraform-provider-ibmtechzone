@@ -74,9 +74,13 @@
 //   - Space-separated regression: NextExtensionDate("2026-07-20 00:00:00", 4) →
 //     the identical "2026-07-24T00:00:00.000Z" — proves the space-separated
 //     wire format is handled identically to RFC3339 for the increment path too.
-//   - Invariant across several durationDays values (1, 4, 7, 30): re-parsing the
-//     returned string via ToEpoch and subtracting the original ToEpoch(provisionUntil)
-//     yields exactly durationDays*86400 seconds.
+//   - Invariant across several durationDays values (1, 4, 7, 30, and 106751/
+//     106752/200000 bracketing/exceeding Go's time.Duration int64-nanosecond
+//     overflow ceiling — r3 audit HIGH finding): re-parsing the returned
+//     string via ToEpoch and subtracting the original ToEpoch(provisionUntil)
+//     yields exactly durationDays*86400 seconds, always AFTER the input, never
+//     before (int64-second arithmetic throughout — never routed through a
+//     nanosecond-scaled time.Duration, which is what silently overflowed).
 //
 // @interface DefaultExtensionWindowFraction (const, float64)
 //
@@ -446,6 +450,18 @@ func TestNextExtensionDate(t *testing.T) {
 // regardless of the specific duration value. Mirrors the existing
 // TestCreateEndDate_InvariantHoldsAcrossDurations convention in
 // resource_reservation_end_date_unit_test.go (same repo, same style).
+//
+// r3 audit finding (HIGH) regression coverage: 106751/106752/200000 bracket
+// and exceed Go's time.Duration int64-nanosecond overflow ceiling
+// (~106,751 days / ~292 years — 9223372036854775807 ns ÷ 86400×10⁹ ns/day).
+// Before the fix (constructing time.Duration(durationDays)*24*time.Hour and
+// Add()-ing it), durationDays beyond this threshold silently wrapped to a
+// date that could be chronologically BEFORE the input provisionUntil, still
+// returning ok=true. The int64-second-arithmetic fix keeps this exact
+// invariant (gotEpoch == baseEpoch + days*86400) holding correctly all the
+// way through 200,000 days — a mutation back to the time.Duration-based
+// implementation fails this invariant at 106752 and 200000 (though not at
+// 106751, which sits just under the old ceiling).
 func TestNextExtensionDate_InvariantAcrossDurations(t *testing.T) {
 	t.Parallel()
 
@@ -455,7 +471,7 @@ func TestNextExtensionDate_InvariantAcrossDurations(t *testing.T) {
 		t.Fatalf("setup: ToEpoch(%q) unexpectedly failed", provisionUntil)
 	}
 
-	for _, days := range []int64{1, 4, 7, 30} {
+	for _, days := range []int64{1, 4, 7, 30, 106751, 106752, 200000} {
 		days := days
 		t.Run(numDaysName(days), func(t *testing.T) {
 			t.Parallel()
@@ -472,6 +488,17 @@ func TestNextExtensionDate_InvariantAcrossDurations(t *testing.T) {
 				t.Errorf("NextExtensionDate(%q, %d) round-tripped to epoch %d, want %d (base %d + %d*86400)",
 					provisionUntil, days, gotEpoch, wantEpoch, baseEpoch, days)
 			}
+			// Direct, explicit direction check (not just the invariant above):
+			// the result must be AFTER the input, never before — this is the
+			// exact symptom the pre-fix overflow produced (a wrapped date
+			// landing up to ~291 years BEFORE provisionUntil, with ok=true).
+			if gotEpoch <= baseEpoch {
+				t.Errorf("NextExtensionDate(%q, %d) = %q (epoch %d), which is NOT after the input "+
+					"provisionUntil (epoch %d) — this is the exact overflow symptom the r3 audit "+
+					"HIGH finding identified: a positive durationDays must always advance the date "+
+					"forward, never backward or in place",
+					provisionUntil, days, gotDate, gotEpoch, baseEpoch)
+			}
 		})
 	}
 }
@@ -487,6 +514,12 @@ func numDaysName(days int64) string {
 		return "duration_7d"
 	case 30:
 		return "duration_30d"
+	case 106751:
+		return "duration_106751d_justUnderOldOverflowCeiling"
+	case 106752:
+		return "duration_106752d_justOverOldOverflowCeiling"
+	case 200000:
+		return "duration_200000d_wellPastOldOverflowCeiling"
 	default:
 		return "duration_Nd"
 	}

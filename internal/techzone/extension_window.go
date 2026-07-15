@@ -77,6 +77,22 @@ func InExtensionWindow(provisionUntil string, now time.Time, durationDays int64,
 // Returns ("", false) if provisionUntil is unparseable or durationDays <= 0
 // (same fail-closed contract as InExtensionWindow — callers should treat this
 // as "cannot compute", not "computed empty").
+//
+// Implementation note (r3 audit finding, HIGH): the increment is computed as
+// direct int64-second arithmetic (epoch + durationDays*86400), NOT by
+// constructing a time.Duration(durationDays) * 24 * time.Hour and Add()-ing
+// it. time.Duration is itself an int64 count of NANOSECONDS, so multiplying
+// durationDays by 24*time.Hour (86,400,000,000,000 ns/day) silently
+// integer-overflows for durationDays beyond ~106,751 (~292 years —
+// 9223372036854775807 ns ÷ 86400×10⁹ ns/day), wrapping to a nonsensical date
+// that can be chronologically BEFORE the input provisionUntil, still
+// returning ok=true. reservation_duration_days has no upper-bound schema
+// validator, so this was reachable via a plausible misconfiguration (e.g., a
+// duration accidentally expressed in the wrong unit). Working in whole
+// seconds as int64 throughout (never converting to a nanosecond-scaled
+// time.Duration) pushes the overflow boundary out to durationDays greater
+// than roughly 1.06e14 (~292 million years) — far beyond any value that
+// could plausibly reach this function.
 func NextExtensionDate(provisionUntil string, durationDays int64) (string, bool) {
 	if durationDays <= 0 {
 		return "", false
@@ -85,6 +101,6 @@ func NextExtensionDate(provisionUntil string, durationDays int64) (string, bool)
 	if !ok {
 		return "", false
 	}
-	next := time.Unix(epoch, 0).UTC().Add(time.Duration(durationDays) * 24 * time.Hour)
+	next := time.Unix(epoch+durationDays*86400, 0).UTC()
 	return next.Format("2006-01-02T15:04:05.000Z"), true
 }

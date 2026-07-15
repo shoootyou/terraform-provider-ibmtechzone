@@ -595,7 +595,14 @@ func (r *reservationResource) Create(ctx context.Context, req resource.CreateReq
 	durationDays := plan.ReservationDurationDays.ValueInt64()
 
 	start := now.Add(time.Minute).Format("2006-01-02T15:04:05.000Z")
-	end := now.Add(time.Duration(durationDays) * 24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+	// end computed via direct int64-second arithmetic on the Unix epoch,
+	// NOT by constructing a time.Duration(durationDays)*24*time.Hour and
+	// Add()-ing it (r3 audit finding, HIGH — same overflow pattern fixed in
+	// techzone.NextExtensionDate/extension_window.go: time.Duration is an
+	// int64 count of NANOSECONDS, so that expression silently overflows for
+	// durationDays beyond ~106,751 (~292 years), which reservation_duration_days
+	// has no upper-bound validator to prevent).
+	end := time.Unix(now.Unix()+durationDays*86400, 0).UTC().Format("2006-01-02T15:04:05.000Z")
 
 	input := techzone.CreateInput{
 		Name:          plan.ReservationName.ValueString(),

@@ -58,9 +58,15 @@ import (
 //
 // Keeping it in sync with the production code is intentional: if someone changes
 // the formula, this helper will diverge and the test will detect the regression.
+//
+// r3 audit finding (HIGH) bonus fix: end is computed via direct int64-second
+// arithmetic on the Unix epoch, matching the production fix — NOT via
+// time.Duration(durationDays)*24*time.Hour, which silently overflows for
+// durationDays beyond ~106,751 (~292 years). Byte-identical to the prior
+// formula for every realistic (non-overflowing) durationDays value.
 func endDateFromNow(nowFn func() time.Time, durationDays int64) time.Time {
 	now := nowFn().UTC().Truncate(time.Minute)
-	endStr := now.Add(time.Duration(durationDays) * 24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+	endStr := time.Unix(now.Unix()+durationDays*86400, 0).UTC().Format("2006-01-02T15:04:05.000Z")
 	// Parse back to time.Time so callers can do arithmetic comparisons.
 	t, err := time.Parse("2006-01-02T15:04:05.000Z", endStr)
 	if err != nil {
@@ -201,6 +207,48 @@ func TestCreateEndDate_InvariantHoldsAcrossDurations(t *testing.T) {
 						"  end      = %v",
 					actualInterval, maxAllowed, days, nowReal, endNew,
 				)
+			}
+		})
+	}
+}
+
+// TestCreateEndDate_LargeDurationDoesNotOverflow: r3 audit finding (HIGH)
+// bonus fix — the identical time.Duration-nanosecond-overflow pattern found
+// in techzone.NextExtensionDate (extension_window.go, fixed in the same
+// batch) predated this entire plan here too (git blame: v1.0.0, cb3334d).
+// For durationDays beyond ~106,751 (~292 years — Go's time.Duration
+// int64-nanosecond ceiling), the old now.Add(time.Duration(durationDays)*24*
+// time.Hour) expression silently overflowed, capable of producing an end
+// date BEFORE now. This test confirms the int64-second-arithmetic fix keeps
+// end strictly after now, and exactly on the expected epoch, for
+// durationDays values that bracket and exceed the old overflow ceiling.
+func TestCreateEndDate_LargeDurationDoesNotOverflow(t *testing.T) {
+	t.Parallel()
+
+	// On-the-minute already, so Truncate(time.Minute) is a no-op — keeps the
+	// expected-epoch arithmetic below exact with no truncation adjustment.
+	nowReal := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return nowReal }
+
+	for _, days := range []int64{106751, 106752, 200000} {
+		days := days
+		t.Run(fmt.Sprintf("duration_%dd", days), func(t *testing.T) {
+			t.Parallel()
+
+			end := endDateFromNow(nowFn, days)
+
+			if !end.After(nowReal) {
+				t.Errorf("endDateFromNow(nowReal=%v, durationDays=%d) = %v, which is NOT after nowReal — "+
+					"this is the exact overflow symptom the r3 audit HIGH finding identified in the "+
+					"sibling techzone.NextExtensionDate (a positive durationDays must always advance "+
+					"the date forward, never backward or in place)",
+					nowReal, days, end)
+			}
+
+			wantEnd := nowReal.Unix() + days*86400
+			if end.Unix() != wantEnd {
+				t.Errorf("endDateFromNow(nowReal=%v, durationDays=%d) = epoch %d, want %d (nowReal %d + %d*86400)",
+					nowReal, days, end.Unix(), wantEnd, nowReal.Unix(), days)
 			}
 		})
 	}
