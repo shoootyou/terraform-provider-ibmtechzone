@@ -1325,6 +1325,82 @@ func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// r3 audit finding 3 (round 3, MEDIUM) — the r2 finding 2 fix above (deriving
+// body_preview from the validated tzExtensionSuccessResponse struct instead
+// of raw body bytes) dropped the implicit ~200-byte cap that
+// truncate(extBody, 200) gave for free: fmt.Sprintf("message=%q status=%d",
+// ok2xx.Message, ok2xx.Status) had no length limit on Message, so an
+// unexpectedly large Message field produced an unbounded log line.
+// ---------------------------------------------------------------------------
+
+// TestReadUnit_Extension_Succeeds_LogsBodyPreview_MessageIsTruncated: a huge
+// (50,000-byte) Message field must still produce a bounded body_preview —
+// re-applying truncate() (already used at 5 other call sites in this file)
+// to ok2xx.Message specifically, before formatting.
+func TestReadUnit_Extension_Succeeds_LogsBodyPreview_MessageIsTruncated(t *testing.T) {
+	t.Parallel()
+	const reservationID = "ext-res-1"
+	const initialExtendCount = int64(0)
+
+	hugeMessage := strings.Repeat("A", 50000)
+	hugeBody, err := json.Marshal(map[string]any{"message": hugeMessage, "status": 200})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	fx := newExtensionReadFixture(t,
+		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
+		http.StatusOK, string(hugeBody),
+	)
+	srv := fx.Server()
+
+	r := buildExtensionTestResource(t, srv.URL, fixedNowForExtensionTests)
+	s := resourceSchemaForDelete(t)
+	state := buildExtensionTestState(t, s, reservationID, extensionTestDurationDays, extensionTestWindowFraction, initialExtendCount, provisionUntilInsideWindow)
+
+	req := resource.ReadRequest{State: state}
+	resp := resource.ReadResponse{State: state}
+
+	entries := captureAllTFLogEntries(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
+	}
+
+	// Generous margin over the ~200-byte truncate() cap plus the
+	// `message=".." status=200` wrapper and any %q escaping overhead — the
+	// point is proving bounded growth, not pinning an exact byte count.
+	const maxAllowedBodyPreviewLen = 250
+
+	found := false
+	for _, e := range entries {
+		if msg, _ := e["@message"].(string); msg != "Reservation extended" {
+			continue
+		}
+		bp, ok := e["body_preview"]
+		if !ok {
+			t.Fatalf(`Read(): "Reservation extended" log entry is missing body_preview: %v`, e)
+		}
+		bpStr, _ := bp.(string)
+		if len(bpStr) > maxAllowedBodyPreviewLen {
+			t.Errorf("r3 audit finding 3: body_preview is %d bytes (input Message was %d bytes) — "+
+				"want capped at roughly 200 bytes via truncate(), got unbounded growth: %.60s...",
+				len(bpStr), len(hugeMessage), bpStr)
+		}
+		if !strings.Contains(bpStr, "…") {
+			t.Errorf("r3 audit finding 3: body_preview = %.60s... does not contain the truncate() "+
+				"ellipsis marker, suggesting the 50,000-byte Message was not actually truncated", bpStr)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal(`Read(): expected a "Reservation extended" log entry, found none`)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Hallazgo 2 (audit round 1, HIGH) — distinguish "falls through to the
 // independent PastExpiry re-evaluation" from "prunes unconditionally
 // without re-evaluating."

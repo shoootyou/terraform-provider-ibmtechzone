@@ -1007,7 +1007,12 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 				"reservation_id": reservationID, "new_provision_until": newExtensionDate,
 			}
 			if extStatus != 401 && extStatus != 403 && extStatus != 302 {
-				succeededLogFields["body_preview"] = fmt.Sprintf("message=%q status=%d", ok2xx.Message, ok2xx.Status)
+				// r3 audit finding 3 (MEDIUM): truncate ok2xx.Message before
+				// logging. Switching to the validated struct (r2 finding 2)
+				// dropped the implicit ~200-byte cap that truncate(extBody, 200)
+				// gave for free — an unexpectedly large Message field would
+				// otherwise produce an unbounded log line.
+				succeededLogFields["body_preview"] = fmt.Sprintf("message=%q status=%d", truncate([]byte(ok2xx.Message), 200), ok2xx.Status)
 			}
 			tflog.Info(ctx, "Reservation extended", succeededLogFields)
 			newState := mapResponseToModel(state, &apiResp)
