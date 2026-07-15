@@ -19,7 +19,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/float64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
@@ -59,8 +61,9 @@ type reservationModel struct {
 	RequesterContext  types.Object `tfsdk:"requester_context"`
 
 	// Operational inputs (no RequiresReplace)
-	ReservationDurationDays types.Int64 `tfsdk:"reservation_duration_days"`
-	TimeoutMinutes          types.Int64 `tfsdk:"timeout_minutes"`
+	ReservationDurationDays types.Int64   `tfsdk:"reservation_duration_days"`
+	TimeoutMinutes          types.Int64   `tfsdk:"timeout_minutes"`
+	ExtensionWindowFraction types.Float64 `tfsdk:"extension_window_fraction"`
 
 	// Computed outputs
 	ID           types.String `tfsdk:"id"`
@@ -68,6 +71,7 @@ type reservationModel struct {
 	ServiceLinks types.List   `tfsdk:"service_links"`
 	StartDate    types.String `tfsdk:"start_date"`
 	EndDate      types.String `tfsdk:"end_date"`
+	ExtendCount  types.Int64  `tfsdk:"extend_count"`
 }
 
 // RequesterContextModel is the nested struct for the requester_context attribute.
@@ -108,6 +112,7 @@ type tzReservationResponse struct {
 	ProvisionUntil *string     `json:"provisionUntil"`
 	End            *string     `json:"end"`
 	EndDate        *string     `json:"endDate"`
+	ExtendCount    *int64      `json:"extendCount"` // confirmed present on every GET/create response
 }
 
 // tzSvcLink is one element from the serviceLinks array.
@@ -124,6 +129,156 @@ type tzCreateResponse struct {
 // tzPollResponse is the minimal shape used during the poll loop.
 type tzPollResponse struct {
 	Status *string `json:"status"`
+}
+
+// ---------------------------------------------------------------------------
+// Extension-window: payload builder, 400-response classifier, validator
+// ---------------------------------------------------------------------------
+
+// tzExtensionRejection decodes the subset of a 400 response body relevant to
+// the extension-eligibility decision (idea sessions 3/4/6).
+type tzExtensionRejection struct {
+	Error  string   `json:"error"`
+	Errors []string `json:"errors"`
+	Policy struct {
+		IsExtendable *bool `json:"isExtendable"`
+	} `json:"policy"`
+}
+
+// extensionOutcome classifies a completed extension POST attempt.
+type extensionOutcome int
+
+const (
+	extensionUnknown extensionOutcome = iota // zero value never returned — a stray zero-value here is a bug
+	extensionSucceeded
+	extensionNotPossible // expected, evidenced outcome — fall through to prune/recreate, log at Info
+	extensionAmbiguous   // unrecognized shape — fall through to prune/recreate, but log at Warn (see spec §6)
+)
+
+// buildExtensionPayload constructs the JSON body for POST /api/reservation/aws/<id>
+// (the confirmed extension mechanism, idea sessions 2/3/6). Wire fields:
+//
+//	IBMID:         reservation owner's email — same source as the delete
+//	               payload's IBMID (state.UserEmail).
+//	requestType:   always "aws".
+//	extensionDate: new ABSOLUTE provisionUntil (ISO-8601, NOT a delta —
+//	               confirmed empirically). See techzone.NextExtensionDate.
+//	reservationId: the reservation ID.
+//	id:            duplicate of reservationId — confirmed required by the
+//	               real API alongside reservationId.
+func buildExtensionPayload(userEmail, reservationID, extensionDate string) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"IBMID":         userEmail,
+		"requestType":   "aws",
+		"extensionDate": extensionDate,
+		"reservationId": reservationID,
+		"id":            reservationID,
+	})
+}
+
+// classifyExtensionResponse decides the outcome of a completed POST
+// /api/reservation/aws/<id> extension attempt from its HTTP status and body.
+//
+// Rules (confirmed by 6 empirical research sessions,
+// .yui-soul/ideas/terraform-provider-ibmtechzone.md):
+//   - status in [200,300): extensionSucceeded. The confirmed success body
+//     ({"message":"ok","status":200}) carries no usable reservation data —
+//     the caller derives new state from the request it just sent, not from
+//     this response.
+//   - status == 400 AND body decodes with policy.isExtendable != nil AND
+//     *policy.isExtendable == false: extensionNotPossible. This is the
+//     confirmed-universal signal across BOTH documented rejection patterns:
+//   - limit exhausted:        errors:[]                      + validation.extension:true
+//   - never extendable (limit 0 from creation): errors:["Invalid extension date"] + validation.extension:false
+//     Deciding on policy.isExtendable ALONE — never on errors[] contents or
+//     the error string, which vary by sub-case (idea sessions 3/4/6).
+//   - Anything else (malformed JSON, policy.isExtendable absent/null,
+//     unexpected status code) → extensionAmbiguous. Caller MUST log this
+//     (spec §6) — this is the concrete fix for the fail-silent-to-KEEP
+//     pattern: an unrecognized shape must be OBSERVABLE, not silently
+//     equivalent to a clean rejection.
+func classifyExtensionResponse(status int, body []byte) extensionOutcome {
+	if status >= 200 && status < 300 {
+		return extensionSucceeded
+	}
+	if status == 400 {
+		var rej tzExtensionRejection
+		if err := json.Unmarshal(body, &rej); err == nil &&
+			rej.Policy.IsExtendable != nil && !*rej.Policy.IsExtendable {
+			return extensionNotPossible
+		}
+	}
+	return extensionAmbiguous
+}
+
+// extensionWindowFractionValidator enforces that extension_window_fraction,
+// multiplied by reservation_duration_days, never exceeds
+// reservation_duration_days itself — equivalent to requiring
+// extension_window_fraction <= 1.0 given the current "increment = full
+// duration" design (spec §2), but computed and reported against both real
+// sibling values so the error message is concrete, not just an abstract
+// bound (Q1, user decision 2026-07-15).
+//
+// KNOWN LIMITATION (accepted — see spec "Known limitation" section): if
+// reservation_duration_days is not set in the user's config (relying on its
+// own schema Default), this validator cannot read a resolved value for it —
+// ValidateFloat64 runs against the RAW config, before defaults are ever
+// applied. In that case this validator deliberately skips validation rather
+// than guessing at a value that doesn't exist yet.
+type extensionWindowFractionValidator struct{}
+
+func (v extensionWindowFractionValidator) Description(_ context.Context) string {
+	return "extension_window_fraction × reservation_duration_days must not exceed reservation_duration_days"
+}
+
+func (v extensionWindowFractionValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (v extensionWindowFractionValidator) ValidateFloat64(ctx context.Context, req validator.Float64Request, resp *validator.Float64Response) {
+	// Not set by the user at all (relying on the schema Default) — nothing
+	// to validate against a value the user isn't choosing.
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	fraction := req.ConfigValue.ValueFloat64()
+
+	var durationDays types.Int64
+	diags := req.Config.GetAttribute(ctx, path.Root("reservation_duration_days"), &durationDays)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// KNOWN LIMITATION (accepted, see spec): unset/unknown sibling means "it
+	// resolves to its own Default later, not visible from here yet." Skip
+	// rather than guess — see the dedicated spec section.
+	if durationDays.IsNull() || durationDays.IsUnknown() {
+		return
+	}
+
+	days := durationDays.ValueInt64()
+	if days <= 0 {
+		// Nonsensical, but validating reservation_duration_days itself is
+		// not this validator's job — InExtensionWindow already fails closed
+		// on durationDays<=0 at runtime regardless (spec §1).
+		return
+	}
+
+	windowDays := fraction * float64(days)
+	if windowDays > float64(days) {
+		resp.Diagnostics.AddAttributeError(
+			req.Path,
+			"Invalid extension_window_fraction",
+			fmt.Sprintf(
+				"extension_window_fraction is %g, and reservation_duration_days is %d, so the "+
+					"computed extension window would be %g days — longer than the reservation's "+
+					"own %d-day duration. extension_window_fraction must be in the range (0, 1] so "+
+					"that extension_window_fraction × reservation_duration_days never exceeds "+
+					"reservation_duration_days.",
+				fraction, days, windowDays, days,
+			),
+		)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +409,20 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Computed: true,
 				Default:  int64default.StaticInt64(30),
 			},
+			"extension_window_fraction": schema.Float64Attribute{
+				MarkdownDescription: "Fraction (0, 1] of `reservation_duration_days`, counted backward from " +
+					"the reservation's `end_date`, during which the provider attempts an automatic extension " +
+					"before falling back to recreation. Defaults to `0.5` (the last 50% of the reservation's " +
+					"duration). Must satisfy `extension_window_fraction * reservation_duration_days <= " +
+					"reservation_duration_days` (i.e. `extension_window_fraction <= 1.0`), so a single " +
+					"successful extension always moves the reservation outside its own window.",
+				Optional: true,
+				Computed: true,
+				Default:  float64default.StaticFloat64(techzone.DefaultExtensionWindowFraction),
+				Validators: []validator.Float64{
+					extensionWindowFractionValidator{},
+				},
+			},
 
 			// --- Computed outputs ---
 			"id": schema.StringAttribute{
@@ -298,6 +467,13 @@ func (r *reservationResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Computed:            true,
 				// UseStateForUnknown: same rationale as status (audit fix H1).
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+			},
+			"extend_count": schema.Int64Attribute{
+				MarkdownDescription: "Number of successful extensions applied to this reservation via the " +
+					"provider's extension-window mechanism (wire field `extendCount`). Starts at `0`. Reset to " +
+					"`0` when the resource is recreated (a new reservation is a new `extendCount` sequence).",
+				Computed:      true,
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 			},
 		},
 	}
@@ -712,8 +888,76 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	// Prune: past provisionUntil (audit fix H3: use injected clock r.now()).
 	provisionUntil := derefString(apiResp.ProvisionUntil)
+
+	// --- Extension-window attempt (at most once per Read() call; no
+	// in-process retry loop — a failed/ambiguous attempt is retried, if at
+	// all, on the NEXT Terraform refresh cycle, keeping Read() bounded like
+	// today, unlike Create()'s poll loop). Never calls Diagnostics.AddError —
+	// extension is a best-effort optimization in front of the proven
+	// recreate fallback; only tflog is used (spec §5/§6).
+	durationDays := state.ReservationDurationDays.ValueInt64()
+	windowFraction := state.ExtensionWindowFraction.ValueFloat64()
+	eligible, ok := techzone.InExtensionWindow(provisionUntil, r.now(), durationDays, windowFraction)
+	switch {
+	case !ok:
+		// Cannot determine (unparseable provisionUntil / durationDays<=0).
+		// Must log, not silently skip (spec §6).
+		tflog.Warn(ctx, "Could not determine extension-window eligibility, skipping extension attempt", map[string]any{
+			"reservation_id": reservationID, "provision_until": provisionUntil, "duration_days": durationDays,
+		})
+	case eligible:
+		newExtensionDate, dateOK := techzone.NextExtensionDate(provisionUntil, durationDays)
+		if !dateOK {
+			tflog.Warn(ctx, "Extension window eligible but could not compute extensionDate, skipping extension attempt", map[string]any{
+				"reservation_id": reservationID,
+			})
+			break
+		}
+		payload, buildErr := buildExtensionPayload(state.UserEmail.ValueString(), reservationID, newExtensionDate)
+		if buildErr != nil {
+			tflog.Warn(ctx, "Failed to build extension payload, skipping extension attempt", map[string]any{
+				"reservation_id": reservationID, "error": buildErr.Error(),
+			})
+			break
+		}
+		extStatus, extBody, extErr := r.pd.Client.DoPost(ctx, "/api/reservation/aws/"+url.PathEscape(reservationID), payload)
+		if extErr != nil {
+			tflog.Warn(ctx, "Extension POST transport error, falling back to existing prune logic", map[string]any{
+				"reservation_id": reservationID, "error": extErr.Error(),
+			})
+			break
+		}
+		switch classifyExtensionResponse(extStatus, extBody) {
+		case extensionSucceeded:
+			tflog.Info(ctx, "Reservation extended", map[string]any{
+				"reservation_id": reservationID, "new_provision_until": newExtensionDate,
+			})
+			newState := mapResponseToModel(state, &apiResp)
+			newState.EndDate = types.StringValue(newExtensionDate)
+			newState.ExtendCount = types.Int64Value(derefInt64(apiResp.ExtendCount) + 1)
+			resp.Diagnostics.Append(resp.State.Set(ctx, newState)...)
+			return // skip PastExpiry — reservation is now known-live
+		case extensionNotPossible:
+			tflog.Info(ctx, "Extension not possible (policy.isExtendable=false), falling back to existing prune logic", map[string]any{
+				"reservation_id": reservationID, "http_status": extStatus,
+			})
+			// fall through — unchanged
+		default: // extensionAmbiguous
+			tflog.Warn(ctx, "Extension response could not be classified, falling back to existing prune logic", map[string]any{
+				"reservation_id": reservationID, "http_status": extStatus, "body_preview": truncate(extBody, 200),
+			})
+			// fall through — unchanged
+		}
+	}
+	// case ok && !eligible (the common case — not yet near expiry): no log,
+	// by design. This is the routine outcome for the vast majority of Read()
+	// calls; logging it would be noise, not signal.
+	// --- end extension-window attempt ---
+
+	// Prune: past provisionUntil (audit fix H3: use injected clock r.now()).
+	// Evaluated against the ORIGINAL provisionUntil in every fall-through
+	// path above.
 	if techzone.PastExpiry(provisionUntil, r.now()) {
 		resp.State.RemoveResource(ctx)
 		return
@@ -747,6 +991,9 @@ func (r *reservationResource) Update(ctx context.Context, req resource.UpdateReq
 	// Copy operational values from plan into state; leave all other fields unchanged.
 	state.TimeoutMinutes = plan.TimeoutMinutes
 	state.ReservationDurationDays = plan.ReservationDurationDays
+	state.ExtensionWindowFraction = plan.ExtensionWindowFraction // spec §5 — no RequiresReplace, so an
+	// edit to this attribute must not be silently discarded (Update has no
+	// generic "copy all operational fields" loop to piggyback on).
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
@@ -899,6 +1146,8 @@ func mapResponseToModel(base reservationModel, r *tzReservationResponse) reserva
 	}
 	out.ServiceLinks = listVal
 
+	out.ExtendCount = types.Int64Value(derefInt64(r.ExtendCount))
+
 	return out
 }
 
@@ -908,6 +1157,14 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// derefInt64 returns *n if n is non-nil, otherwise 0.
+func derefInt64(n *int64) int64 {
+	if n == nil {
+		return 0
+	}
+	return *n
 }
 
 // firstNonEmpty returns the first non-empty string from the candidates,
