@@ -454,6 +454,84 @@ func TestExtensionWindowFractionValidator(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestReservationSchema_ExtensionWindowFraction / TestReservationSchema_ExtendCount
+//
+// Direct schema-shape assertions against the REAL reservationResource{}.Schema()
+// (via resourceSchemaForDelete(t), the same helper resource_reservation_delete_unit_test.go
+// and resource_reservation_schema_unit_test.go already use) — distinct from
+// TestExtensionWindowFractionValidator above, which exercises the validator
+// type in isolation against a minimal local schema. These two tests pin that
+// the production Schema() actually wires the new attributes in with the right
+// shape (Optional/Computed/Default/validator attachment), matching this
+// package's established convention for schema-shape tests (see
+// TestReservationSchema_RequesterContextExists in
+// resource_reservation_schema_unit_test.go).
+// ---------------------------------------------------------------------------
+
+func TestReservationSchema_ExtensionWindowFraction(t *testing.T) {
+	t.Parallel()
+	s := resourceSchemaForDelete(t)
+
+	raw, ok := s.Attributes["extension_window_fraction"]
+	if !ok {
+		t.Fatal("FAIL: `extension_window_fraction` attribute is absent from schema; must be an " +
+			"Optional+Computed Float64Attribute with a Default (spec §3d)")
+	}
+	fa, ok := raw.(rschema.Float64Attribute)
+	if !ok {
+		t.Fatalf("FAIL: `extension_window_fraction` is %T, want rschema.Float64Attribute", raw)
+	}
+	if !fa.Optional {
+		t.Error("FAIL: `extension_window_fraction` must be Optional (user may override the default fraction)")
+	}
+	if !fa.Computed {
+		t.Error("FAIL: `extension_window_fraction` must be Computed (so the Default resolves for configs that don't set it)")
+	}
+	if fa.Default == nil {
+		t.Error("FAIL: `extension_window_fraction` must have a Default " +
+			"(spec: float64default.StaticFloat64(techzone.DefaultExtensionWindowFraction))")
+	}
+	if len(fa.Validators) == 0 {
+		t.Fatal("FAIL: `extension_window_fraction` must have at least one Validator (extensionWindowFractionValidator)")
+	}
+	foundValidator := false
+	for _, v := range fa.Validators {
+		if _, ok := v.(extensionWindowFractionValidator); ok {
+			foundValidator = true
+			break
+		}
+	}
+	if !foundValidator {
+		t.Error("FAIL: `extension_window_fraction` Validators must include extensionWindowFractionValidator{}")
+	}
+}
+
+func TestReservationSchema_ExtendCount(t *testing.T) {
+	t.Parallel()
+	s := resourceSchemaForDelete(t)
+
+	raw, ok := s.Attributes["extend_count"]
+	if !ok {
+		t.Fatal("FAIL: `extend_count` attribute is absent from schema; must be a Computed Int64Attribute (spec §4)")
+	}
+	ia, ok := raw.(rschema.Int64Attribute)
+	if !ok {
+		t.Fatalf("FAIL: `extend_count` is %T, want rschema.Int64Attribute", raw)
+	}
+	if !ia.Computed {
+		t.Error("FAIL: `extend_count` must be Computed (read-only, wire-sourced from extendCount)")
+	}
+	if ia.Optional || ia.Required {
+		t.Error("FAIL: `extend_count` must be Computed-only — not user-settable (Optional and Required must both be false)")
+	}
+	if len(ia.PlanModifiers) == 0 {
+		t.Error("FAIL: `extend_count` should carry a PlanModifier (int64planmodifier.UseStateForUnknown(), " +
+			"matching status/start_date/end_date's existing audit-fix-H1 rationale: avoid " +
+			"\"Provider produced inconsistent result\" on operational-only Updates)")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Read() integration — extension-window attempt
 //
 // White-box, direct r.Read(ctx, req, &resp) calls (no full acceptance-test
