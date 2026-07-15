@@ -953,8 +953,21 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 		}
 		switch classifyExtensionResponse(extStatus, extBody) {
 		case extensionSucceeded:
-			// body_preview added for observability symmetry with the
-			// extensionAmbiguous branch below (audit round-1 finding #5).
+			// body_preview logs the VALIDATED struct fields (message, status),
+			// NOT raw body bytes (r2 finding 2). classifyExtensionResponse's
+			// shape check only confirms Status==200 or a non-empty Message —
+			// it does not reject unexpected additional fields (Go's
+			// json.Unmarshal ignores unknown keys). Logging truncate(extBody,
+			// 200) would reflect the body's FULL raw content verbatim,
+			// including any such unexpected field, exceeding what was
+			// actually validated. Re-decoding here (rather than threading the
+			// struct through classifyExtensionResponse's return signature)
+			// keeps that function's signature and existing test suite
+			// unchanged; the decode below is guaranteed to succeed
+			// identically to the one classifyExtensionResponse already
+			// performed on this exact body to reach this branch.
+			var ok2xx tzExtensionSuccessResponse
+			_ = json.Unmarshal(extBody, &ok2xx) // guaranteed success — see comment above
 			// Guarded with the same 401/403/302 check as finding #1, applied
 			// here for consistency — defense in depth only, since a genuine
 			// extensionSucceeded classification can never itself carry a
@@ -964,7 +977,7 @@ func (r *reservationResource) Read(ctx context.Context, req resource.ReadRequest
 				"reservation_id": reservationID, "new_provision_until": newExtensionDate,
 			}
 			if extStatus != 401 && extStatus != 403 && extStatus != 302 {
-				succeededLogFields["body_preview"] = truncate(extBody, 200)
+				succeededLogFields["body_preview"] = fmt.Sprintf("message=%q status=%d", ok2xx.Message, ok2xx.Status)
 			}
 			tflog.Info(ctx, "Reservation extended", succeededLogFields)
 			newState := mapResponseToModel(state, &apiResp)

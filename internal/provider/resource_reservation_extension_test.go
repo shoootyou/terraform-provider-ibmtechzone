@@ -1143,7 +1143,33 @@ func TestReadUnit_Extension_POST302_BodyPreviewRedacted(t *testing.T) {
 // Hallazgo 5 (audit round 1, MEDIUM) — observability symmetry: the
 // extensionSucceeded branch's "Reservation extended" log entry now includes
 // body_preview (previously only new_provision_until).
+//
+// r2 finding 2 (audit round 2, MEDIUM): body_preview must be derived from the
+// VALIDATED tzExtensionSuccessResponse struct (message, status), never raw
+// body bytes — classifyExtensionResponse's shape check only requires
+// Status==200 or a non-empty Message and does not reject unexpected
+// additional fields (Go's json.Unmarshal ignores unknown keys), so logging
+// truncate(extBody, 200) would reflect the body's full raw content verbatim,
+// including any such unexpected field, exceeding what was actually
+// validated. extensionSuccessBodyWithExtraField below carries one such
+// unexpected field, embedding a sentinel, to prove it never leaks.
 // ---------------------------------------------------------------------------
+
+// extensionSuccessSentinelExtraField is embedded in an unexpected additional
+// field of a fabricated 2xx extension-POST success body (r2 finding 2). It
+// must never appear in any log entry — only the validated message/status
+// fields may be reflected in body_preview.
+const extensionSuccessSentinelExtraField = "SENTINEL-EXTRA-FIELD-DO-NOT-LOG"
+
+// extensionSuccessBodyWithExtraField: the confirmed-real success shape
+// ({"message":"ok","status":200}) plus one additional, unexpected field.
+// classifyExtensionResponse still classifies this as extensionSucceeded
+// (Go's json.Unmarshal ignores the unknown key) — the point of this fixture
+// is to prove that the EXTRA field's content never reaches body_preview, not
+// to test classification itself (TestClassifyExtensionResponse already
+// covers that).
+var extensionSuccessBodyWithExtraField = fmt.Sprintf(
+	`{"message":"ok","status":200,"unexpected_field":%q}`, extensionSuccessSentinelExtraField)
 
 func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
 	t.Parallel()
@@ -1152,7 +1178,7 @@ func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
 
 	fx := newExtensionReadFixture(t,
 		http.StatusOK, canonicalReadBody("Ready", provisionUntilInsideWindow, initialExtendCount),
-		http.StatusOK, extensionSuccessBody,
+		http.StatusOK, extensionSuccessBodyWithExtraField,
 	)
 	srv := fx.Server()
 
@@ -1171,6 +1197,11 @@ func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
 		t.Fatalf("Read(): expected no error, got: %v", resp.Diagnostics)
 	}
 
+	// r2 finding 2: body_preview must be EXACTLY this pinned, struct-derived
+	// format — never the raw body bytes (which would also contain the
+	// unexpected_field sentinel below).
+	const wantBodyPreview = `message="ok" status=200`
+
 	found := false
 	for _, e := range entries {
 		if msg, _ := e["@message"].(string); msg != "Reservation extended" {
@@ -1181,13 +1212,32 @@ func TestReadUnit_Extension_Succeeds_LogsBodyPreview(t *testing.T) {
 			t.Fatalf(`Read(): "Reservation extended" log entry is missing body_preview `+
 				`(Hallazgo 5 — observability symmetry with the extensionAmbiguous branch): %v`, e)
 		}
-		if bpStr, _ := bp.(string); bpStr == "" {
+		bpStr, _ := bp.(string)
+		if bpStr == "" {
 			t.Error(`Read(): "Reservation extended" log entry's body_preview is present but empty`)
+		}
+		if bpStr != wantBodyPreview {
+			t.Errorf(`Read(): "Reservation extended" log entry's body_preview = %q, want %q `+
+				`(r2 finding 2: body_preview must be derived from the validated message/status `+
+				`struct, not raw body bytes)`, bpStr, wantBodyPreview)
 		}
 		found = true
 	}
 	if !found {
 		t.Fatal(`Read(): expected a "Reservation extended" log entry, found none`)
+	}
+
+	// r2 finding 2's core assertion: the raw body's unexpected extra field
+	// must never leak into ANY log entry, at any level — mirrors this file's
+	// existing sentinel-scan convention (runExtensionAuthOrRedirectBodyRedactedTest).
+	for i, e := range entries {
+		for k, v := range e {
+			if strings.Contains(fmt.Sprintf("%v", v), extensionSuccessSentinelExtraField) {
+				t.Errorf("r2 finding 2: log entry %d field %q leaked the 2xx body's unexpected "+
+					"extra field content — body_preview must reflect only the validated "+
+					"message/status struct fields, never raw body bytes: %v", i, k, v)
+			}
+		}
 	}
 }
 
