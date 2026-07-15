@@ -1286,7 +1286,14 @@ func TestReadUnit_Extension_RejectedButNotPastExpiry_RemainsLiveWithUnchangedEnd
 // genuine transport-layer failure specifically on the extension POST (the
 // initial canonical GET succeeds normally), and confirms the same
 // no-blocking-error fallback already proven for extensionAmbiguous /
-// extensionNotPossible.
+// extensionNotPossible — AND that the production tflog.Warn on this exact
+// path (resource_reservation.go:948-951) actually fires, matching its
+// structurally-identical sibling
+// TestReadUnit_Extension_AmbiguousResponse_FallsThroughToPrune_LogsWarn
+// (r2 finding 4 — the plan's own must_have README D9/Q3 requires tflog.Warn
+// on transport error, but this test previously verified only the
+// no-blocking-error/exactly-1-POST/prune-fallthrough behavior, not the log
+// emission itself).
 func TestReadUnit_Extension_POSTTransportError_FallsThroughToPrune(t *testing.T) {
 	t.Parallel()
 	const reservationID = "ext-res-1"
@@ -1303,7 +1310,10 @@ func TestReadUnit_Extension_POSTTransportError_FallsThroughToPrune(t *testing.T)
 
 	req := resource.ReadRequest{State: state}
 	resp := resource.ReadResponse{State: state}
-	r.Read(context.Background(), req, &resp)
+
+	warns := captureTFLogWarnings(t, func(ctx context.Context) {
+		r.Read(ctx, req, &resp)
+	})
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Read(): a POST transport error must never raise a blocking error, got: %v", resp.Diagnostics)
@@ -1320,6 +1330,13 @@ func TestReadUnit_Extension_POSTTransportError_FallsThroughToPrune(t *testing.T)
 	if !resp.State.Raw.IsNull() {
 		t.Error("Read(): a POST transport error must fall through to the existing PastExpiry prune — " +
 			"resource should have been removed from state, but it was not")
+	}
+	if len(warns) == 0 {
+		t.Error("Read(): a POST transport error MUST be logged at tflog.Warn — " +
+			"must_have README D9/Q3 requires this, and its structurally-identical sibling " +
+			"(AmbiguousResponse_FallsThroughToPrune_LogsWarn) already asserts the same for " +
+			"the adjacent extensionAmbiguous path; silence here would be a sibling-inconsistent " +
+			"coverage gap (r2 finding 4)")
 	}
 }
 
