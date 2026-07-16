@@ -13,8 +13,10 @@ import (
 //   - Empty string or the literal "null" → (0, false).
 //   - All-digit string with ≥13 digits → epoch milliseconds → return (v/1000, true).
 //   - All-digit string with <13 digits → epoch seconds → return (v, true).
-//   - Otherwise: try RFC3339, then bare "2006-01-02T15:04:05" (treated as UTC).
-//     Parse failure → (0, false).
+//   - Otherwise: try RFC3339, then bare "2006-01-02T15:04:05" (treated as UTC),
+//     then space-separated "2006-01-02 15:04:05" (no "T", no timezone marker,
+//     treated as UTC — TechZone's real provisionUntil/provisionDate wire format).
+//     Parse failure on all three → (0, false).
 func ToEpoch(s string) (int64, bool) {
 	// Trim surrounding double-quotes (TechZone sometimes wraps values in extra
 	// quotes) and ASCII whitespace — mirrors read.sh `tr -d '"'` + whitespace trim.
@@ -47,6 +49,11 @@ func ToEpoch(s string) (int64, bool) {
 	}
 	if t, err := time.Parse("2006-01-02T15:04:05", v); err == nil {
 		// Bare format carries no timezone; treat as UTC (mirrors read.sh `date -u -d`).
+		return t.UTC().Unix(), true
+	}
+	// Layout: space-separator, no timezone — as returned by the real TechZone API.
+	// Treat as UTC, consistent with the bare-T branch above.
+	if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
 		return t.UTC().Unix(), true
 	}
 

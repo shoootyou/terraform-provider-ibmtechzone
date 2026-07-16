@@ -16,10 +16,14 @@
 //   - The digit-branch cutover is exactly >= 13: a 12-digit input goes to the
 //     epoch-seconds branch; a 13-digit input goes to epoch-milliseconds.
 //     Never >= 12 or > 13.  Pinned by the 12-digit and 13-digit test rows (F-7).
-//   - Otherwise: attempt time.Parse with RFC3339 (layout "2006-01-02T15:04:05Z07:00")
-//     then time.Parse with bare ISO-8601 (layout "2006-01-02T15:04:05", treated as UTC).
-//     On success → return (t.UTC().Unix(), true).
-//     Both fail → return (0, false).
+//   - Otherwise: attempt time.Parse with RFC3339 (layout "2006-01-02T15:04:05Z07:00"),
+//     then time.Parse with bare ISO-8601 (layout "2006-01-02T15:04:05", treated as UTC),
+//     then time.Parse with the space-separated layout "2006-01-02 15:04:05" (no "T",
+//     no timezone marker — treated as UTC, identical handling to the bare-T branch).
+//     This third layout is TechZone's real provisionUntil/provisionDate wire format
+//     (see trailing @see gotcha reference).
+//     On success (any of the three) → return (t.UTC().Unix(), true).
+//     All three fail → return (0, false).
 //
 // @edge-cases
 //   - "null"  (4 bytes)        → (0, false)          // C2 — jq -r null literal
@@ -32,6 +36,10 @@
 //   - "15778368000000" (14 dig)→ (15778368000, true)  // ms, >13
 //   - ISO-8601 with Z          → (correct UTC epoch, true)
 //   - ISO-8601 without Z       → (correct UTC epoch, true)  // treated as UTC
+//   - "2026-07-14 20:18:00" (space-separated) → (1784060280, true)
+//     // TechZone's real provisionUntil/provisionDate format — no "T", no tz marker
+//   - "\"2026-07-14 20:18:00\"" (quoted, space-separated) → (1784060280, true)
+//     // proves the existing double-quote trim also covers the new format
 //
 // @interface PastExpiry(provisionUntil string, now time.Time) bool
 //
@@ -49,6 +57,8 @@
 //   - now == until (exact second)     → false (KEEP)       // C1 — strict >, not >=
 //   - now == until - 1s (future)      → false (KEEP)
 //   - now == until + 1s (past by 1s)  → true  (PRUNE)
+//   - provisionUntil space-separated ("2026-07-14 20:18:00"), now = 2026-07-15
+//     → true (PRUNE)  // TechZone real-world format; see ToEpoch @edge-cases above
 //
 // @interface IsTerminalStatus(status string) bool
 //
@@ -70,6 +80,9 @@
 // @see ./client.go  (HTTP transport; orthogonal to prune logic)
 // @see RFC 015 §3.2 (.yui-soul/rfcs/approved/015-techzone-native-terraform-provider/README.md)
 // @see read.sh (VCDLD-1678/repos/ddr-cloudaccounts-temp-aws-account/modules/techzone-reservation/scripts/read.sh)
+// @see .yui-soul/knowledge/gotchas/ibm-techzone.md (confirmed root-cause: TechZone's
+//   real provisionUntil/provisionDate wire format is space-separated, not RFC3339/bare-T;
+//   ToEpoch's missing third branch made PastExpiry a permanent no-op in production)
 
 package techzone_test
 
@@ -178,6 +191,23 @@ func TestToEpoch(t *testing.T) {
 			wantEpoch: 1577836800,
 		},
 
+		// --- space-separated: TechZone's real provisionUntil/provisionDate format ---
+		// Confirmed root-cause (Sui): the real API never returns RFC3339 or bare-T,
+		// only this space-separated, no-timezone layout. See
+		// .yui-soul/knowledge/gotchas/ibm-techzone.md.
+
+		{
+			// Epoch independently re-verified against `date -u -d`, Python, and Go's
+			// own time.Parse("2006-01-02 15:04:05", ...).UTC().Unix() during plan
+			// creation (plan 04 README, Decision D5). Do NOT reuse 1752530280 — that
+			// value decodes to a different instant (2025-07-14T21:58:00Z) and was
+			// discarded as incorrect.
+			name:      "space_separated_no_tz_provisionUntil",
+			input:     "2026-07-14 20:18:00",
+			wantOK:    true,
+			wantEpoch: 1784060280,
+		},
+
 		// --- quoted values: TechZone API sometimes wraps field values in extra quotes ---
 
 		{
@@ -193,6 +223,15 @@ func TestToEpoch(t *testing.T) {
 			input:     `"2020-01-01T00:00:00Z"`,
 			wantOK:    true,
 			wantEpoch: 1577836800,
+		},
+		{
+			// Proves the existing double-quote trim also covers the new
+			// space-separated format, not just RFC3339 — TechZone occasionally
+			// wraps this format in extra quotes too.
+			name:      "quoted_space_separated_provisionUntil",
+			input:     `"2026-07-14 20:18:00"`,
+			wantOK:    true,
+			wantEpoch: 1784060280,
 		},
 	}
 
@@ -305,6 +344,20 @@ func TestPastExpiry(t *testing.T) {
 			until: "2099-01-01T00:00:00Z",
 			now:   fixedNow,
 			want:  false,
+		},
+
+		// --- space-separated (TechZone's real provisionUntil/provisionDate format) ---
+		// Uses its own anchor `now` (2026-07-15), independent of fixedNow, matching
+		// the exact confirmed production regression scenario (plan 04 README, D5).
+
+		{
+			// Real-world regression case (Sui root-cause): TechZone's actual wire
+			// format, no "T", no timezone marker. now (2026-07-15T00:00:00Z) is
+			// strictly after until (2026-07-14T20:18:00Z) → PRUNE.
+			name:  "space_separated_past_PRUNE",
+			until: "2026-07-14 20:18:00",
+			now:   time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC),
+			want:  true,
 		},
 
 		// --- epoch-second string (10-digit, clearly past) → PRUNE ---
