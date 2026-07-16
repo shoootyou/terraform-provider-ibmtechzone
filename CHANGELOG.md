@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/shoootyou/terraform-provider-ibmtechzone/compare/v1.0.1...v1.0.2) (2026-07-16)
+
+
+### Bug Fixes
+
+* TechZone date parsing + feat: reservation extension window ([#23](https://github.com/shoootyou/terraform-provider-ibmtechzone/issues/23)) ([4a436aa](https://github.com/shoootyou/terraform-provider-ibmtechzone/commit/4a436aa771908a7afeeb657ac38c240b1450ae80))
+
 ## [1.0.1](https://github.com/shoootyou/terraform-provider-ibmtechzone/compare/v1.0.0...v1.0.1) (2026-07-14)
 
 
