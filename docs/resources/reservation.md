@@ -5,10 +5,23 @@ collection to derive the platform/region/template fields, submits a reservation
 request, polls until the reservation reaches `Ready` status (configurable via
 `timeout_minutes`), and stores the resulting service links and dates in state.
 
-During `terraform refresh` and `terraform plan`, the resource prunes itself from
-state automatically when the reservation has expired or been deleted upstream — the
-next `apply` recreates it. `Delete` is idempotent and preserves state on auth
-failure so the operator can refresh their token and retry without re-importing.
+During `terraform refresh` and `terraform plan`, once the current time enters the
+reservation's **extension window** — the last `extension_window_fraction` fraction
+of `reservation_duration_days`, counted backward from `end_date` — the provider
+first attempts to extend the reservation via the TechZone API (unless TechZone
+already reports the reservation as terminally `Deleted`/`Expired`, in which case it
+is pruned immediately, skipping the extension attempt). A successful extension
+advances `end_date` and increments `extend_count` in state; no recreation happens
+and no plan diff is produced. Extension is a best-effort optimization layered in
+front of the resource's existing lifecycle: it never raises a blocking error, and
+any failure to extend (API rejection, an exhausted extension limit, a transport
+error, or simply being outside the window) falls back to the original behavior —
+the resource prunes itself from state when the reservation has expired or been
+deleted upstream, and the next `apply` recreates it. Extension attempts and
+fallbacks are only visible via provider logs (`TF_LOG=INFO` or higher).
+
+`Delete` is idempotent and preserves state on auth failure so the operator can
+refresh their token and retry without re-importing.
 
 ## Example Usage
 
@@ -42,6 +55,7 @@ resource "ibmtechzone_reservation" "example" {
   purpose                   = "Learning"
   reservation_duration_days = 2
   timeout_minutes           = 45
+  extension_window_fraction = 0.25 # attempt extension in the last 12h of the 2-day duration
 }
 
 output "aws_console_url" {
@@ -109,6 +123,23 @@ The following arguments are supported:
   to reach `Ready` status. Defaults to `30`. Changing this value does not force a
   new resource.
 
+* `extension_window_fraction` - (Optional, Number) Fraction `(0, 1]` of
+  `reservation_duration_days`, counted backward from `end_date`, during which the
+  provider attempts to extend the reservation instead of recreating it (see the
+  extension behavior described above). Defaults to `0.5` (the last 50% of the
+  reservation's duration). Changing this value does not force a new resource.
+
+  Validated at `terraform plan` time: `extension_window_fraction *
+  reservation_duration_days` must not exceed `reservation_duration_days` —
+  equivalent to requiring `extension_window_fraction <= 1.0` — so that a single
+  successful extension always moves `end_date` back outside its own window.
+  **Known limitation:** this cross-attribute check only runs when
+  `reservation_duration_days` is *also* set explicitly in the same `resource`
+  block. If `reservation_duration_days` is left at its own default, the validator
+  has no resolved sibling value to compare against yet and silently skips the
+  check — set both attributes explicitly if you depend on plan-time validation of
+  `extension_window_fraction`.
+
 ## Attribute Reference
 
 In addition to all arguments above, the following computed attributes are exported:
@@ -126,7 +157,13 @@ In addition to all arguments above, the following computed attributes are export
   (with fallback to `start` → `startDate`).
 
 * `end_date` - Reservation end date (ISO-8601), sourced from `provisionUntil`
-  (with fallback to `end` → `endDate`).
+  (with fallback to `end` → `endDate`). Advances automatically on each successful
+  automatic extension (see `extension_window_fraction` above).
+
+* `extend_count` - Number of successful extensions applied to this reservation via
+  the automatic extension-window mechanism (wire field `extendCount`). Starts at
+  `0` and resets to `0` when the resource is recreated — a new reservation begins
+  a new count.
 
 ## Import
 
